@@ -44,6 +44,64 @@ afterEach(() => {
 });
 
 describe("capacity request ordering", () => {
+  it("keeps loaded values after malformed refresh data and recovers on retry", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(json(data(first)))
+        .mockResolvedValueOnce(json({ ...data(first), people: null }))
+        .mockResolvedValueOnce(json(data(first, 32))),
+    );
+    const { result } = renderHook(() => useCapacity(first));
+    await waitFor(() => expect(result.current.current).not.toBeNull());
+    const acceptedRead = result.current.readRevision;
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.error).toMatch(/Capacity data/);
+    expect(result.current.current?.people[0].weekly_hours).toBe(40);
+    expect(result.current.loading).toBe(false);
+    expect(result.current.readRevision).toBe(acceptedRead);
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.error).toBeNull();
+    expect(result.current.current?.people[0].weekly_hours).toBe(32);
+    expect(result.current.readRevision).toBeGreaterThan(acceptedRead);
+  });
+
+  it("does not confirm or apply a successful response for a different person", async () => {
+    const olderRead = deferred<Response>();
+    const patch = deferred<Response>();
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(data(first)))
+      .mockReturnValueOnce(patch.promise)
+      .mockReturnValueOnce(olderRead.promise);
+    vi.stubGlobal("fetch", mock);
+    const { result } = renderHook(() => useCapacity(first));
+    await waitFor(() => expect(result.current.current).not.toBeNull());
+    let save!: ReturnType<typeof result.current.save>;
+    let refresh!: ReturnType<typeof result.current.refresh>;
+    act(() => {
+      save = result.current.save(1, 20);
+      refresh = result.current.refresh();
+    });
+    await act(async () => {
+      patch.resolve(json({ id: 2, name: "Someone else", weekly_hours: 20 }));
+      expect((await save).kind).toBe("unconfirmed");
+    });
+    expect(mock).toHaveBeenCalledTimes(3);
+    expect(result.current.current?.people[0].weekly_hours).toBe(40);
+    expect(result.current.saving).toBe(false);
+    await act(async () => {
+      olderRead.resolve(json(data(first, 20)));
+      expect(await refresh).toEqual({ obsolete: true });
+    });
+    expect(result.current.current?.people[0].weekly_hours).toBe(40);
+  });
+
   it("times out a read without discarding previously confirmed values", async () => {
     vi.useFakeTimers();
     let pendingSignal: AbortSignal | undefined;
@@ -188,7 +246,8 @@ describe("capacity request ordering", () => {
     expect(olderSave?.kind).toBe("saved");
     expect(result.current.saving).toBe(false);
     expect(result.current.loading).toBe(true);
-    if (olderSave?.kind !== "saved") throw new Error("Expected a confirmed save");
+    if (olderSave?.kind !== "saved")
+      throw new Error("Expected a confirmed save");
     const olderRefresh = olderSave.refresh;
 
     let save!: ReturnType<typeof result.current.save>;
@@ -207,7 +266,8 @@ describe("capacity request ordering", () => {
     expect(newerSave?.kind).toBe("saved");
     expect(result.current.current?.people[0].weekly_hours).toBe(48);
     expect(result.current.saving).toBe(false);
-    if (newerSave?.kind !== "saved") throw new Error("Expected a confirmed save");
+    if (newerSave?.kind !== "saved")
+      throw new Error("Expected a confirmed save");
     const newerRefresh = newerSave.refresh;
 
     await act(async () => {

@@ -5,6 +5,7 @@ import {
   type CapacityQuery,
   type Person,
 } from "./capacity";
+import { parseCapacityResponse, parseSavedPerson } from "./responses";
 
 type ReadState = {
   data: CapacityData | null;
@@ -84,7 +85,7 @@ export function useCapacity(query: CapacityQuery) {
               "Capacity could not be loaded. Please try again.",
             ),
           );
-        const data = (await response.json()) as CapacityData;
+        const data = parseCapacityResponse(await response.json(), target);
         if (!isCurrent()) return { obsolete: true };
         setState({
           data,
@@ -167,10 +168,9 @@ export function useCapacity(query: CapacityQuery) {
             return { kind: "rejected", message };
           return unknownOutcome();
         }
-        const person = (await response.json()) as Pick<
-          Person,
-          "id" | "name" | "weekly_hours"
-        >;
+        // A malformed success body is an unconfirmed write: it may already have
+        // committed, so preserve the draft and never claim it was rejected.
+        const person = parseSavedPerson(await response.json(), id);
         // A read begun before OR during this write may still contain the old capacity.
         ++generation.current;
         controller.current?.abort();

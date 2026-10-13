@@ -107,6 +107,8 @@ func parseCapacityRange(query url.Values) (capacityRange, error) {
 // for either supported calendar; weekly capacity is never prorated.
 // Keep scoped_assignments inline so PostgreSQL can use the date index before
 // aggregating. NUMERIC multiplication and SUM preserve fractional seed rows.
+// The fixed PostgreSQL image includes language-neutral ICU ordering, so accented
+// names sort alphabetically. ID breaks name ties and keeps each person together.
 const capacityQuery = `
 WITH weeks AS MATERIALIZED (
     SELECT $1::date + n * 7 AS week_start,
@@ -128,7 +130,7 @@ SELECT p.id, p.name, p.weekly_hours::double precision,
        coalesce(t.allocated, 0)::double precision
 FROM people p CROSS JOIN weeks w
 LEFT JOIN totals t ON t.person_id = p.id AND t.week_start = w.week_start
-ORDER BY p.id, w.week_start
+ORDER BY p.name COLLATE "und-x-icu", p.id, w.week_start
 `
 
 func (s *server) handleCapacity(w http.ResponseWriter, r *http.Request) {

@@ -108,6 +108,17 @@ much easier when the notes are honest about what you didn't get to.
 
 - Date selections include every intersecting **complete week**. The displayed range
   shows the effective boundaries. Previous/next moves the selection seven days.
+- **This week** returns to the viewer's current week while preserving the number
+  of complete weeks selected and the working-week preset. **Refresh** reloads the
+  applied range without clearing filters or capacity drafts.
+- The URL stores the applied dates, working-week preset, name search, over-capacity
+  filter, people page, and rows per page. Reloading or sharing a link restores the
+  view; Back and Forward restore committed navigation. Search typing replaces the
+  current history entry. Unsaved date and capacity drafts stay out of the URL.
+- People appear in language-neutral Unicode alphabetical order, with IDs breaking
+  identical-name ties. Names are isolated for mixed writing directions. Escape
+  cancels editing and restores focus, while preserving any unconfirmed save; an
+  active save or read-back check must finish before dismissing the editor.
 - The workweek preset applies to everyone in this view: **Monday–Friday** uses
   Monday-start weeks; **Sunday–Thursday** uses Sunday-start weeks. Assignment start
   and end dates are inclusive, and only the preset's five working days contribute.
@@ -135,6 +146,12 @@ from being repeated in every cell. Omitting `workweek` selects `mon-fri`.
 invalid input, 404 for an unknown person, and 500 for database failures. Reads bypass
 HTTP caching. A lost save response is treated as an unconfirmed outcome; a failed
 refresh after a confirmed save does not invite a second write.
+
+The client validates successful responses before using them: dates and the workweek
+must match the request, each person must have a unique ID and one finite nonnegative
+allocation per week, and save confirmations must identify the edited person. Invalid
+reads leave previously loaded values available with a refresh error. An invalid save
+confirmation remains unconfirmed because the write may already have committed.
 
 Save confirmation appears as soon as PATCH succeeds. Its returned capacity updates
 the grid and team summary together, while the allocation refresh runs separately.

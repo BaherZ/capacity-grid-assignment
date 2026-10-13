@@ -1,6 +1,7 @@
 export type Workweek = "mon-fri" | "sun-thu";
 
 export type CapacityQuery = { from: string; to: string; workweek: Workweek };
+export type SavedPerson = Pick<Person, "id" | "name" | "weekly_hours">;
 export type Person = {
   id: number;
   name: string;

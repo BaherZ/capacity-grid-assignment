@@ -87,11 +87,15 @@ func TestCapacityAllOverlapBoundariesPostgres(t *testing.T) {
 			if len(response.People) != len(assignments) || len(response.Weeks) != 2 || response.From != test.from.Format(dateLayout) || response.To != test.from.AddDate(0, 0, 13).Format(dateLayout) {
 				t.Fatalf("wrong response shape or normalized range: %+v", response)
 			}
-			for index, person := range response.People {
-				if person.ID != index+1 || len(person.AllocatedHours) != 2 {
-					t.Fatalf("person/week ordering is incorrect: %+v", person)
+			seen := make(map[int]bool, len(assignments))
+			for _, person := range response.People {
+				if person.ID < 1 || person.ID > len(assignments) || seen[person.ID] || len(person.AllocatedHours) != 2 {
+					t.Fatalf("person identity or week count is incorrect: %+v", person)
 				}
-				span := assignments[index]
+				seen[person.ID] = true
+				// Roster order is alphabetical; fixture identity, not row position,
+				// determines which independent assignment span to check.
+				span := assignments[person.ID-1]
 				for week, got := range person.AllocatedHours {
 					cents := 0
 					// This oracle counts individual working dates, independently of
@@ -105,6 +109,11 @@ func TestCapacityAllOverlapBoundariesPostgres(t *testing.T) {
 					if want := float64(cents) / 100; got != want {
 						t.Errorf("person %d, %s–%s, week %d: got %v; want %v", person.ID, span.from.Format(dateLayout), span.to.Format(dateLayout), week, got, want)
 					}
+				}
+			}
+			for id := 1; id <= len(assignments); id++ {
+				if !seen[id] {
+					t.Errorf("person %d is missing from the complete roster", id)
 				}
 			}
 		})
@@ -132,12 +141,14 @@ INSERT INTO assignments VALUES (1, '2024-01-01', '2029-12-31', 0.13);
 		if len(response.Weeks) != maxCapacityWeeks || len(response.People) != 2 {
 			t.Fatalf("incorrect maximum-range shape: %+v", response)
 		}
-		for index, person := range response.People {
-			if len(person.AllocatedHours) != maxCapacityWeeks {
-				t.Fatalf("person %d missing weeks", person.ID)
+		seen := make(map[int]bool, 2)
+		for _, person := range response.People {
+			if person.ID < 1 || person.ID > 2 || seen[person.ID] || len(person.AllocatedHours) != maxCapacityWeeks {
+				t.Fatalf("unexpected person identity or missing weeks: %+v", person)
 			}
+			seen[person.ID] = true
 			want := 0.0
-			if index == 0 {
+			if person.ID == 1 {
 				want = 0.65
 			}
 			for week, allocated := range person.AllocatedHours {

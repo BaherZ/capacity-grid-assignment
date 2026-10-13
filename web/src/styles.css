@@ -290,6 +290,8 @@ main {
 .week-navigation {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
 .week-navigation > span {
@@ -1023,7 +1025,11 @@ main {
   }
   .week-navigation {
     gap: 5px;
-    padding-top: 13px;
+    padding-top: 0;
+    max-width: 175px;
+  }
+  .week-navigation > .button:not(.button-icon) {
+    padding-inline: 9px;
   }
   .week-navigation > span {
     display: none;
