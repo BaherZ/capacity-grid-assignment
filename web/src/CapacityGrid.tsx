@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   fullDate,
   hours,
@@ -70,6 +77,7 @@ export function CapacityGrid({ from, to }: Props) {
   const hoursInput = useRef<HTMLInputElement>(null);
   const editorTrigger = useRef<HTMLButtonElement | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
+  const tableScroll = useRef<HTMLDivElement>(null);
   const capacity = useCapacity(query);
   const data = capacity.current;
   const effective = normalizeRange(query);
@@ -116,6 +124,11 @@ export function CapacityGrid({ from, to }: Props) {
     currentPage * pageSize,
     (currentPage + 1) * pageSize,
   );
+
+  useLayoutEffect(() => {
+    // Begin each set of people at its first row, keeping the same weeks in view.
+    if (tableScroll.current) tableScroll.current.scrollTop = 0;
+  }, [currentPage, pageSize, search, overOnly]);
 
   function applyRange(event: FormEvent) {
     event.preventDefault();
@@ -231,12 +244,12 @@ export function CapacityGrid({ from, to }: Props) {
           checked: true,
           message: unchangedDraft
             ? `The current server value is ${hours(person.weekly_hours)} hours per week and matches your draft.`
-            : `The current server value matches your earlier submission of ${hours(person.weekly_hours)} hours per week. Your new draft of ${draft} hours has not been saved.`,
+            : `The current server value matches your earlier submission of ${hours(person.weekly_hours)} hours per week. Your current draft has not been saved.`,
         });
       } else {
         updateDraft(id, {
           checked: true,
-          message: `The latest server value is ${hours(person.weekly_hours)} hours per week. Your draft is still ${draft}. The earlier request may still finish; check again before choosing to save your draft again.`,
+          message: `The latest server value is ${hours(person.weekly_hours)} hours per week. Your draft is still ${draft.trim() || "blank"}. The earlier request may still finish; check again before choosing to save your draft again.`,
         });
       }
     } else if (result.error) {
@@ -711,6 +724,7 @@ export function CapacityGrid({ from, to }: Props) {
         ) : (
           <>
             <div
+              ref={tableScroll}
               className={`table-scroll${readBlocked ? " table-stale" : ""}`}
               role="region"
               aria-label="Capacity table. Scroll horizontally for more weeks."
