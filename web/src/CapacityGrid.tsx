@@ -88,6 +88,27 @@ export function CapacityGrid({ from, to }: Props) {
   );
 
   useEffect(() => {
+    if (capacity.readRevision === 0) return;
+    // Any successful current read recovers the refresh, including week navigation.
+    // Only clear old refresh failures; unsaved and unconfirmed drafts stay intact.
+    setDrafts((previous) => {
+      const recovered = Object.values(previous).filter(
+        (draft) => draft.status === "saved-refresh-failed",
+      );
+      if (recovered.length === 0) return previous;
+      const next = { ...previous };
+      for (const draft of recovered) {
+        next[draft.id] = {
+          ...draft,
+          status: "saved",
+          message: `Saved · ${hours(draft.original)} h/week.`,
+        };
+      }
+      return next;
+    });
+  }, [capacity.readRevision]);
+
+  useEffect(() => {
     if (activeEditor !== null) {
       hoursInput.current?.focus();
       hoursInput.current?.select();
@@ -500,7 +521,7 @@ export function CapacityGrid({ from, to }: Props) {
             <h3>{editor.name}</h3>
             <p>
               This changes capacity for all past and future weeks.
-              <br />
+              <br />{" "}
               Allocations stay the same.
             </p>
           </div>

@@ -65,6 +65,155 @@ afterEach(() => {
 });
 
 describe("weekly capacity editing", () => {
+  it("keeps each person's draft separate when switching editors during a current-value check", async () => {
+    const check = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(json(fixture()))
+        .mockRejectedValueOnce(new TypeError("Response lost"))
+        .mockReturnValueOnce(check.promise),
+    );
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    fireEvent.change(await openEditor(), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/We could not confirm whether your change was saved/);
+    fireEvent.click(screen.getByRole("button", { name: "Check current value" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit weekly hours for Eli" }),
+    );
+    const eliInput = screen.getByRole("textbox", { name: "Weekly hours for Eli" });
+    expect(eliInput).toHaveValue("0");
+    expect(eliInput).toBeDisabled();
+    await act(async () => check.resolve(json(fixture(20))));
+    expect(eliInput).toHaveValue("0");
+    expect(eliInput).toBeEnabled();
+    expect(screen.queryByText(/matches your draft/)).not.toBeInTheDocument();
+    fireEvent.change(eliInput, { target: { value: "15" } });
+    expect(await openEditor()).toHaveValue("20");
+    expect(screen.getByText(/matches your draft/)).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit weekly hours for Eli" }),
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Weekly hours for Eli" }),
+    ).toHaveValue("15");
+    expect(screen.getByRole("button", { name: "Save capacity" })).toBeEnabled();
+  });
+
+  it("does not resolve an uncertain save using an obsolete check after changing weeks", async () => {
+    const check = deferred<Response>();
+    const nextRange = {
+      ...fixture(),
+      from: "2026-01-05",
+      to: "2026-01-25",
+      weeks: [
+        { start: "2026-01-05", end: "2026-01-11" },
+        { start: "2026-01-12", end: "2026-01-18" },
+        { start: "2026-01-19", end: "2026-01-25" },
+      ],
+    };
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(fixture()))
+      .mockRejectedValueOnce(new TypeError("Response lost"))
+      .mockReturnValueOnce(check.promise)
+      .mockResolvedValueOnce(json(nextRange));
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    fireEvent.change(await openEditor(), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/We could not confirm whether your change was saved/);
+    fireEvent.click(screen.getByRole("button", { name: "Check current value" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next week" }));
+    await screen.findByRole("columnheader", { name: /Jan 19 – Jan 25/ });
+    await act(async () => check.resolve(json(fixture(20))));
+    expect(
+      screen.getByRole("textbox", { name: "Weekly hours for Ana" }),
+    ).toHaveValue("20");
+    expect(screen.getByText(/A save is unconfirmed/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save capacity" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Check current value" }),
+    ).toBeEnabled();
+    expect(screen.queryByText(/matches your draft/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Edit weekly hours for Ana" }),
+    ).toHaveTextContent("40 h / week");
+    expect(mock).toHaveBeenCalledTimes(4);
+  });
+
+  it("clears an old refresh failure after newly selected weeks load successfully", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(json(fixture()))
+        .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 32 }))
+        .mockRejectedValueOnce(new TypeError("Refresh unavailable"))
+        .mockResolvedValueOnce(
+          json({
+            ...fixture(32),
+            from: "2026-01-05",
+            to: "2026-01-25",
+            weeks: [
+              { start: "2026-01-05", end: "2026-01-11" },
+              { start: "2026-01-12", end: "2026-01-18" },
+              { start: "2026-01-19", end: "2026-01-25" },
+            ],
+          }),
+        ),
+    );
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    fireEvent.change(await openEditor(), { target: { value: "32" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/Saved · 32 h\/week. The capacity refresh failed/);
+    fireEvent.click(screen.getByRole("button", { name: "Next week" }));
+    await screen.findByRole("button", { name: "Edit weekly hours for Ana" });
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/The capacity refresh failed/),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Retry refresh" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/Saved · 32 h\/week/)).toBeVisible();
+  });
+
+  it("does not treat an unconfirmed write for another person as a recovered refresh", async () => {
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(fixture()))
+      .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 32 }))
+      .mockRejectedValueOnce(new TypeError("Refresh unavailable"))
+      .mockRejectedValueOnce(new TypeError("Response lost"));
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    fireEvent.change(await openEditor(), { target: { value: "32" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/Saved · 32 h\/week. The capacity refresh failed/);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit weekly hours for Eli" }),
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Weekly hours for Eli" }),
+      { target: { value: "20" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/We could not confirm whether your change was saved/);
+    await openEditor();
+
+    expect(
+      screen.getByText(/Saved · 32 h\/week. The capacity refresh failed/),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Retry refresh" })).toBeEnabled();
+    expect(screen.getByText(/A save is unconfirmed/)).toBeVisible();
+    expect(mock).toHaveBeenCalledTimes(4);
+  });
+
   it("confirms a save while refreshing and explains why the filtered person disappears", async () => {
     const refresh = deferred<Response>();
     const mock = vi
