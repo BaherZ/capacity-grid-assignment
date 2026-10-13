@@ -1,22 +1,896 @@
-type Props = {
-  from: string
-  to: string
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  fullDate,
+  hours,
+  normalizeRange,
+  parseWeeklyHours,
+  rangeError,
+  shiftDate,
+  shortDate,
+  type CapacityQuery,
+  type Person,
+  type Workweek,
+} from "./capacity";
+import { useCapacity } from "./useCapacity";
+
+type Props = { from: string; to: string };
+type Draft = {
+  id: number;
+  name: string;
+  value: string;
+  original: number;
+  status:
+    | "editing"
+    | "saving"
+    | "rejected"
+    | "unconfirmed"
+    | "saved"
+    | "saved-refresh-failed";
+  message: string;
+  checked?: boolean;
+  submitted?: number;
+};
+
+function Arrow({ direction }: { direction: "left" | "right" }) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      width="18"
+      height="18"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d={direction === "left" ? "M12 5l-5 5 5 5" : "M8 5l5 5-5 5"}
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
-// CapacityGrid renders one row per person and one column per week, showing
-// how allocated each person is and making over-allocation obvious.
-//
-// It reads from GET /api/capacity?from=&to= — the response shape is whatever
-// you decided on in the API.
-//
-// A person's weekly hours are editable from the grid. After a save, every
-// number that depends on them must be right — without a full page reload.
-//
-// TODO: implement.
 export function CapacityGrid({ from, to }: Props) {
+  const [query, setQuery] = useState<CapacityQuery>({
+    from,
+    to,
+    workweek: "mon-fri",
+  });
+  const [rangeDraft, setRangeDraft] = useState(query);
+  const [validation, setValidation] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [overOnly, setOverOnly] = useState(false);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [drafts, setDrafts] = useState<Record<number, Draft>>({});
+  const [activeEditor, setActiveEditor] = useState<number | null>(null);
+  const [checking, setChecking] = useState(false);
+  const hoursInput = useRef<HTMLInputElement>(null);
+  const editorTrigger = useRef<HTMLButtonElement | null>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const capacity = useCapacity(query);
+  const data = capacity.current;
+  const effective = normalizeRange(query);
+  const editor = activeEditor === null ? null : drafts[activeEditor];
+  const unconfirmedDrafts = Object.values(drafts).filter(
+    (draft) => draft.status === "unconfirmed",
+  );
+
+  useEffect(() => {
+    if (activeEditor !== null) {
+      hoursInput.current?.focus();
+      hoursInput.current?.select();
+    }
+  }, [activeEditor]);
+
+  const summary = useMemo(() => {
+    const people = data?.people ?? [];
+    return {
+      capacity: people.reduce((sum, person) => sum + person.weekly_hours, 0),
+      allocated: people.reduce(
+        (sum, person) =>
+          sum +
+          person.allocated_hours.reduce((total, value) => total + value, 0),
+        0,
+      ),
+      over: people.filter((person) =>
+        person.allocated_hours.some((value) => value > person.weekly_hours),
+      ).length,
+    };
+  }, [data]);
+
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLocaleLowerCase();
+    return (data?.people ?? []).filter(
+      (person) =>
+        person.name.toLocaleLowerCase().includes(needle) &&
+        (!overOnly ||
+          person.allocated_hours.some((value) => value > person.weekly_hours)),
+    );
+  }, [data, search, overOnly]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visible = filtered.slice(
+    currentPage * pageSize,
+    (currentPage + 1) * pageSize,
+  );
+
+  function applyRange(event: FormEvent) {
+    event.preventDefault();
+    const error = rangeError(rangeDraft);
+    setValidation(error);
+    if (!error) {
+      setQuery(rangeDraft);
+      setPage(0);
+    }
+  }
+
+  function moveRange(days: number) {
+    const next = {
+      ...query,
+      from: shiftDate(query.from, days),
+      to: shiftDate(query.to, days),
+    };
+    const error = rangeError(next);
+    setValidation(error);
+    if (!error) {
+      setQuery(next);
+      setRangeDraft(next);
+      setPage(0);
+    }
+  }
+
+  function edit(person: Person, trigger: HTMLButtonElement) {
+    editorTrigger.current = trigger;
+    setDrafts((previous) => ({
+      ...previous,
+      [person.id]: previous[person.id] ?? {
+        id: person.id,
+        name: person.name,
+        value: String(person.weekly_hours),
+        original: person.weekly_hours,
+        status: "editing",
+        message: "",
+      },
+    }));
+    setActiveEditor(person.id);
+  }
+
+  function updateDraft(id: number, change: Partial<Draft>) {
+    setDrafts((previous) => ({
+      ...previous,
+      [id]: { ...previous[id], ...change },
+    }));
+  }
+
+  async function saveHours(event: FormEvent) {
+    event.preventDefault();
+    if (!editor || capacity.saving) return;
+    const parsed = parseWeeklyHours(editor.value);
+    if (parsed === null) {
+      updateDraft(editor.id, {
+        status: "rejected",
+        message:
+          "Enter a number from 0 to 168, with up to two decimal places. Blank is not zero.",
+      });
+      return;
+    }
+    const id = editor.id;
+    updateDraft(id, { status: "saving", message: "", submitted: parsed });
+    const result = await capacity.save(id, parsed);
+    if (result.kind === "saved") {
+      updateDraft(id, {
+        status: result.refreshFailed ? "saved-refresh-failed" : "saved",
+        original: result.person.weekly_hours,
+        value: String(result.person.weekly_hours),
+        checked: false,
+        message: result.refreshFailed
+          ? `Saved ${hours(result.person.weekly_hours)} hours per week. The capacity refresh failed; retry the refresh to check the latest allocations.`
+          : `Saved ${hours(result.person.weekly_hours)} hours per week. Capacity is updated across all weeks.`,
+      });
+    } else {
+      updateDraft(id, {
+        status: result.kind,
+        message: result.message,
+        checked: false,
+      });
+    }
+  }
+
+  async function checkLatest() {
+    if (!editor) return;
+    const id = editor.id;
+    const draft = editor.value;
+    const submitted = editor.submitted;
+    setChecking(true);
+    const result = await capacity.refresh();
+    setChecking(false);
+    if (result.data) {
+      const person = result.data.people.find((row) => row.id === id);
+      if (!person) {
+        updateDraft(id, {
+          message:
+            "This person was not found in the latest roster. Your draft is still here.",
+        });
+      } else if (person.weekly_hours === submitted) {
+        const unchangedDraft = parseWeeklyHours(draft) === submitted;
+        updateDraft(id, {
+          status: unchangedDraft ? "saved" : "editing",
+          original: person.weekly_hours,
+          checked: true,
+          message: unchangedDraft
+            ? `The current server value is ${hours(person.weekly_hours)} hours per week and matches your draft.`
+            : `The current server value matches your earlier submission of ${hours(person.weekly_hours)} hours per week. Your new draft of ${draft} hours has not been saved.`,
+        });
+      } else {
+        updateDraft(id, {
+          checked: true,
+          message: `The latest server value is ${hours(person.weekly_hours)} hours per week. Your draft is still ${draft}. The earlier request may still finish; check again before choosing to save your draft again.`,
+        });
+      }
+    } else if (result.error) {
+      updateDraft(id, {
+        message:
+          "The latest value could not be checked. Your draft is preserved, and the earlier save is still unconfirmed.",
+      });
+    }
+  }
+
+  async function retryRefresh() {
+    const id = editor?.id;
+    const result = await capacity.refresh();
+    if (id !== undefined && result.data) {
+      updateDraft(id, {
+        status: "saved",
+        message:
+          "Your change was saved. The latest capacity has now been loaded.",
+      });
+    }
+  }
+
+  function closeEditor() {
+    if (!editor || capacity.saving) return;
+    // An unconfirmed draft survives dismissing the panel and opening it again.
+    if (editor.status !== "unconfirmed") {
+      setDrafts((previous) => {
+        const next = { ...previous };
+        delete next[editor.id];
+        return next;
+      });
+    }
+    setActiveEditor(null);
+    if (editorTrigger.current?.isConnected) editorTrigger.current.focus();
+    else searchInput.current?.focus();
+  }
+
+  const isSaved =
+    editor?.status === "saved" || editor?.status === "saved-refresh-failed";
+  const isUnconfirmed = editor?.status === "unconfirmed";
+  const readBlocked =
+    capacity.loading || Boolean(capacity.error) || unconfirmedDrafts.length > 0;
+
   return (
-    <p>
-      Nothing here yet — {from} to {to}
-    </p>
-  )
+    <>
+      <section className="range-panel" aria-label="Capacity date range">
+        <form className="range-form" onSubmit={applyRange}>
+          <label>
+            From
+            <input
+              type="date"
+              aria-label="From date"
+              value={rangeDraft.from}
+              min="0001-01-01"
+              max="9999-12-31"
+              onChange={(event) =>
+                setRangeDraft((previous) => ({
+                  ...previous,
+                  from: event.target.value,
+                }))
+              }
+              aria-invalid={Boolean(validation)}
+              aria-describedby={validation ? "range-error" : undefined}
+            />
+          </label>
+          <span className="range-connector" aria-hidden="true">
+            —
+          </span>
+          <label>
+            To
+            <input
+              type="date"
+              aria-label="To date"
+              value={rangeDraft.to}
+              min="0001-01-01"
+              max="9999-12-31"
+              onChange={(event) =>
+                setRangeDraft((previous) => ({
+                  ...previous,
+                  to: event.target.value,
+                }))
+              }
+              aria-invalid={Boolean(validation)}
+              aria-describedby={validation ? "range-error" : undefined}
+            />
+          </label>
+          <label className="workweek-field">
+            Working days
+            <select
+              value={rangeDraft.workweek}
+              onChange={(event) =>
+                setRangeDraft((previous) => ({
+                  ...previous,
+                  workweek: event.target.value as Workweek,
+                }))
+              }
+            >
+              <option value="mon-fri">Monday–Friday</option>
+              <option value="sun-thu">Sunday–Thursday</option>
+            </select>
+          </label>
+          <button className="button button-primary apply-button" type="submit">
+            Apply range
+          </button>
+        </form>
+        {validation && (
+          <p id="range-error" className="field-error" role="alert">
+            {validation}
+          </p>
+        )}
+        <p className="calendar-note">
+          <span aria-hidden="true">ⓘ</span> Whole weeks are shown. The selected
+          working days apply to everyone, with matching week starts. Holidays
+          and leave are not deducted.
+        </p>
+      </section>
+
+      <section className="view-heading" aria-label="Selected weeks">
+        <div>
+          <p className="eyebrow">CAPACITY OVERVIEW</p>
+          <h2>
+            {fullDate(effective.from)} <span className="date-dash">–</span>{" "}
+            {fullDate(effective.to)}
+          </h2>
+          <p className="view-context">
+            {query.workweek === "mon-fri"
+              ? "Monday–Friday · Weeks start Monday"
+              : "Sunday–Thursday · Weeks start Sunday"}
+            {data
+              ? ` · ${data.weeks.length} ${data.weeks.length === 1 ? "week" : "weeks"}`
+              : ""}
+          </p>
+        </div>
+        <div className="week-navigation">
+          <button
+            type="button"
+            className="button button-icon"
+            aria-label="Previous week"
+            onClick={() => moveRange(-7)}
+          >
+            <Arrow direction="left" />
+          </button>
+          <span>Move 1 week</span>
+          <button
+            type="button"
+            className="button button-icon"
+            aria-label="Next week"
+            onClick={() => moveRange(7)}
+          >
+            <Arrow direction="right" />
+          </button>
+        </div>
+      </section>
+
+      <section
+        className={`summary-grid${readBlocked ? " summary-stale" : ""}`}
+        aria-label="Entire team summary"
+      >
+        <div className="summary-card">
+          <span className="summary-label">People on the team</span>
+          <strong>
+            {data ? data.people.length.toLocaleString("en") : "—"}
+          </strong>
+          <span className="summary-detail">
+            Entire roster, including unallocated people
+          </span>
+        </div>
+        <div className="summary-card summary-warning">
+          <span className="summary-label">People over capacity</span>
+          <strong>
+            {data ? summary.over.toLocaleString("en") : "—"}
+            <span className="summary-unit">
+              {data ? ` / ${data.people.length}` : ""}
+            </span>
+          </strong>
+          <span className="summary-detail">
+            In at least one of the selected weeks
+          </span>
+        </div>
+        <div className="summary-card">
+          <span className="summary-label">Allocated in this range</span>
+          <strong>
+            {data ? hours(summary.allocated) : "—"}
+            <span className="summary-unit"> h</span>
+          </strong>
+          <span className="summary-detail">
+            Across the entire team and all shown weeks
+          </span>
+        </div>
+        <div className="summary-card">
+          <span className="summary-label">Team weekly capacity</span>
+          <strong>
+            {data ? hours(summary.capacity) : "—"}
+            <span className="summary-unit"> h</span>
+          </strong>
+          <span className="summary-detail">
+            Available each full week, across the entire team
+          </span>
+        </div>
+      </section>
+
+      {editor && (
+        <section
+          className="editor-panel"
+          aria-label={`Edit capacity for ${editor.name}`}
+        >
+          <div className="editor-intro">
+            <p className="eyebrow">EDIT WEEKLY CAPACITY</p>
+            <h3>{editor.name}</h3>
+            <p>
+              This changes capacity for all past and future weeks.
+              <br />
+              Allocations stay the same.
+            </p>
+          </div>
+          <div className="editor-content">
+            <form className="editor-form" onSubmit={saveHours}>
+              <label>
+                Weekly hours
+                <input
+                  ref={hoursInput}
+                  type="text"
+                  inputMode="decimal"
+                  aria-label={`Weekly hours for ${editor.name}`}
+                  aria-describedby={
+                    editor.message
+                      ? "hours-guidance save-message"
+                      : "hours-guidance"
+                  }
+                  value={editor.value}
+                  disabled={capacity.saving || checking}
+                  aria-invalid={editor.status === "rejected"}
+                  onChange={(event) =>
+                    updateDraft(editor.id, {
+                      value: event.target.value,
+                      status: isUnconfirmed ? "unconfirmed" : "editing",
+                      message: isUnconfirmed
+                        ? "Your draft has changed. The earlier save is still unconfirmed. Check the current value before saving again."
+                        : "",
+                      checked: false,
+                    })
+                  }
+                />
+              </label>
+              <button
+                type="submit"
+                className="button button-primary"
+                disabled={
+                  capacity.saving ||
+                  checking ||
+                  Boolean(isSaved) ||
+                  Boolean(isUnconfirmed && !editor.checked)
+                }
+              >
+                {capacity.saving
+                  ? "Saving…"
+                  : isUnconfirmed && editor.checked
+                    ? "Save draft again"
+                    : "Save capacity"}
+              </button>
+              <button
+                type="button"
+                className="button button-plain"
+                onClick={closeEditor}
+                disabled={capacity.saving || checking}
+              >
+                {isSaved || isUnconfirmed ? "Close editor" : "Cancel"}
+              </button>
+            </form>
+            <p id="hours-guidance" className="input-help">
+              0–168 hours · Up to 2 decimal places · 0 means no capacity
+            </p>
+            {editor.message && (
+              <div
+                className={`save-feedback ${isSaved ? "save-success" : "save-warning"}`}
+                role={editor.status === "rejected" ? "alert" : "status"}
+              >
+                <p id="save-message">{editor.message}</p>
+                {isUnconfirmed && (
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => void checkLatest()}
+                    disabled={checking || capacity.loading}
+                  >
+                    {checking ? "Checking…" : "Check current value"}
+                  </button>
+                )}
+                {editor.status === "saved-refresh-failed" && (
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => void retryRefresh()}
+                    disabled={capacity.loading}
+                  >
+                    Retry refresh
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      <section className="grid-panel" aria-label="Weekly team allocations">
+        <div className="grid-toolbar">
+          <div className="search-wrap">
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 20 20"
+              fill="none"
+              aria-hidden="true"
+            >
+              <circle
+                cx="8.5"
+                cy="8.5"
+                r="5.5"
+                stroke="currentColor"
+                strokeWidth="1.6"
+              />
+              <path
+                d="m13 13 4 4"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+            <input
+              ref={searchInput}
+              type="search"
+              aria-label="Search all people"
+              placeholder="Search all people…"
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(0);
+              }}
+            />
+          </div>
+          <label className="over-filter">
+            <input
+              type="checkbox"
+              checked={overOnly}
+              onChange={(event) => {
+                setOverOnly(event.target.checked);
+                setPage(0);
+              }}
+            />
+            <span>Over capacity only</span>
+          </label>
+          <div className="grid-legend">
+            <span className="legend-dot" /> Over capacity{" "}
+            <span className="legend-neutral" /> Within capacity
+          </div>
+        </div>
+        <div className="read-status" aria-live="polite" aria-atomic="true">
+          {capacity.loading
+            ? data
+              ? "Refreshing capacity… Shown values may be out of date."
+              : "Loading capacity for the selected weeks…"
+            : unconfirmedDrafts.length > 0
+              ? "A save is unconfirmed. Shown values may still change; review the unconfirmed change below."
+              : capacity.error
+                ? ""
+                : data
+                  ? `${filtered.length.toLocaleString("en")} of ${data.people.length.toLocaleString("en")} people match. Values show allocated / capacity hours.`
+                  : ""}
+        </div>
+        {unconfirmedDrafts.length > 0 && (
+          <div className="uncertain-notice">
+            <span>
+              Unconfirmed{" "}
+              {unconfirmedDrafts.length === 1 ? "change" : "changes"}:
+            </span>
+            {unconfirmedDrafts.map((draft) => (
+              <button
+                key={draft.id}
+                type="button"
+                className="text-button"
+                disabled={capacity.saving}
+                onClick={(event) => {
+                  editorTrigger.current = event.currentTarget;
+                  setActiveEditor(draft.id);
+                }}
+              >
+                Review {draft.name}’s change
+              </button>
+            ))}
+          </div>
+        )}
+        {capacity.error && (
+          <div className="load-error" role="alert">
+            <div>
+              <strong>Capacity could not be refreshed.</strong>
+              <p>
+                {capacity.error}{" "}
+                {data
+                  ? "Previously loaded values are shown and may be out of date."
+                  : ""}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button"
+              onClick={() => void capacity.refresh()}
+            >
+              Retry load
+            </button>
+          </div>
+        )}
+        {!data ? (
+          <div className="empty-state">
+            {capacity.loading ? (
+              <>
+                <span className="loading-ring" aria-hidden="true" />
+                <h3>Loading your team’s capacity</h3>
+                <p>Matching people and allocations to the selected weeks.</p>
+              </>
+            ) : (
+              <>
+                <h3>No capacity data loaded</h3>
+                <p>Retry loading to view this date range.</p>
+              </>
+            )}
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="empty-state">
+            <span className="empty-mark" aria-hidden="true">
+              {overOnly && !search ? "✓" : "⌕"}
+            </span>
+            <h3>
+              {overOnly && !search
+                ? "No one is over capacity"
+                : "No people match your filters"}
+            </h3>
+            <p>
+              {overOnly && !search
+                ? "Across the entire roster, everyone is within capacity for these weeks."
+                : "Try a different name or turn off the capacity filter."}
+            </p>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => {
+                setSearch("");
+                setOverOnly(false);
+                setPage(0);
+              }}
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : (
+          <>
+            <div
+              className={`table-scroll${readBlocked ? " table-stale" : ""}`}
+              role="region"
+              aria-label="Capacity table. Scroll horizontally for more weeks."
+              tabIndex={0}
+              aria-busy={capacity.loading}
+            >
+              <table className="capacity-table">
+                <caption className="sr-only">
+                  Weekly allocations for {fullDate(effective.from)} through{" "}
+                  {fullDate(effective.to)}. Each cell shows allocated hours
+                  divided by weekly capacity. All people use{" "}
+                  {query.workweek === "mon-fri"
+                    ? "Monday through Friday"
+                    : "Sunday through Thursday"}{" "}
+                  as working days. Editing weekly capacity changes all weeks.
+                </caption>
+                <thead>
+                  <tr>
+                    <th className="person-column" scope="col">
+                      <span>TEAM MEMBER</span>
+                      <small>Click weekly hours to edit</small>
+                    </th>
+                    {data.weeks.map((week) => (
+                      <th scope="col" key={week.start}>
+                        <span className="week-header">
+                          {shortDate(week.start)}{" "}
+                          <span>– {shortDate(week.end)}</span>
+                        </span>
+                        <small>
+                          {week.start.slice(0, 4)}
+                          {week.end.slice(0, 4) !== week.start.slice(0, 4)
+                            ? ` / ${week.end.slice(0, 4)}`
+                            : ""}
+                        </small>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((person) => (
+                    <tr key={person.id}>
+                      <th scope="row" className="person-column">
+                        <div className="person-cell">
+                          <span className="avatar" aria-hidden="true">
+                            {person.name
+                              .split(/\s+/)
+                              .filter(Boolean)
+                              .slice(0, 2)
+                              .map((part) => part[0])
+                              .join("")}
+                          </span>
+                          <div className="person-detail">
+                            <span className="person-name" title={person.name}>
+                              {person.name}
+                            </span>
+                            <button
+                              type="button"
+                              className="capacity-edit"
+                              aria-label={`Edit weekly hours for ${person.name}`}
+                              disabled={capacity.saving}
+                              onClick={(event) =>
+                                edit(person, event.currentTarget)
+                              }
+                            >
+                              {hours(person.weekly_hours)} h / week{" "}
+                              <svg
+                                width="12"
+                                height="12"
+                                viewBox="0 0 16 16"
+                                fill="none"
+                                aria-hidden="true"
+                              >
+                                <path
+                                  d="m10.5 2.5 3 3-7.5 7.5-4 1 1-4 7.5-7.5Z"
+                                  stroke="currentColor"
+                                  strokeWidth="1.2"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                              {drafts[person.id] &&
+                                !["saved", "saved-refresh-failed"].includes(
+                                  drafts[person.id].status,
+                                ) && (
+                                  <span
+                                    className="draft-dot"
+                                    title="Draft kept"
+                                  />
+                                )}
+                            </button>
+                          </div>
+                        </div>
+                      </th>
+                      {data.weeks.map((week, index) => {
+                        const allocated = person.allocated_hours[index] ?? 0;
+                        const over = allocated > person.weekly_hours;
+                        const excess = allocated - person.weekly_hours;
+                        const fill =
+                          person.weekly_hours > 0
+                            ? Math.min(
+                                100,
+                                (allocated / person.weekly_hours) * 100,
+                              )
+                            : allocated > 0
+                              ? 100
+                              : 0;
+                        return (
+                          <td
+                            key={week.start}
+                            className={
+                              over
+                                ? "cell-over"
+                                : allocated === 0
+                                  ? "cell-empty"
+                                  : "cell-within"
+                            }
+                          >
+                            <div className="allocation-value">
+                              <strong>{hours(allocated)}</strong>
+                              <span> / {hours(person.weekly_hours)} h</span>
+                              {over && (
+                                <span
+                                  className="over-indicator"
+                                  aria-hidden="true"
+                                >
+                                  !
+                                </span>
+                              )}
+                            </div>
+                            <div className="allocation-bar" aria-hidden="true">
+                              <span style={{ width: `${fill}%` }} />
+                            </div>
+                            <span
+                              className={`allocation-note${over ? " over-note" : ""}`}
+                            >
+                              {over
+                                ? `${hours(excess)} h over`
+                                : person.weekly_hours === 0
+                                  ? "No capacity"
+                                  : allocated === 0
+                                    ? "No allocation"
+                                    : `${hours(person.weekly_hours - allocated)} h available`}
+                            </span>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="grid-footer">
+              <p>
+                Showing{" "}
+                <strong>
+                  {currentPage * pageSize + 1}–
+                  {Math.min((currentPage + 1) * pageSize, filtered.length)}
+                </strong>{" "}
+                of <strong>{filtered.length.toLocaleString("en")}</strong>{" "}
+                {filtered.length === data.people.length
+                  ? "people"
+                  : "matching people"}
+              </p>
+              <div className="pagination">
+                <label>
+                  Rows
+                  <select
+                    aria-label="Rows per page"
+                    value={pageSize}
+                    onChange={(event) => {
+                      setPageSize(Number(event.target.value));
+                      setPage(0);
+                    }}
+                  >
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                  </select>
+                </label>
+                <span>
+                  Page {currentPage + 1} of {pageCount}
+                </span>
+                <button
+                  type="button"
+                  className="button button-icon"
+                  aria-label="Previous people page"
+                  disabled={currentPage === 0}
+                  onClick={() => setPage(currentPage - 1)}
+                >
+                  <Arrow direction="left" />
+                </button>
+                <button
+                  type="button"
+                  className="button button-icon"
+                  aria-label="Next people page"
+                  disabled={currentPage + 1 >= pageCount}
+                  onClick={() => setPage(currentPage + 1)}
+                >
+                  <Arrow direction="right" />
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+      <p className="grid-footnote">
+        Allocation adds up all assignments on working days, including overlaps.
+        Capacity is the same in every full week. Figures describe weekly totals;
+        daily peaks can differ.
+      </p>
+    </>
+  );
 }
