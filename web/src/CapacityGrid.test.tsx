@@ -65,6 +65,88 @@ afterEach(() => {
 });
 
 describe("weekly capacity editing", () => {
+  it("confirms a save while refreshing and explains why the filtered person disappears", async () => {
+    const refresh = deferred<Response>();
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(fixture()))
+      .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 48 }))
+      .mockReturnValueOnce(refresh.promise);
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    const input = await openEditor();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Over capacity only" }));
+    fireEvent.change(input, { target: { value: "48" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+
+    expect(await screen.findByText("Saved · 48 h/week.")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Saving…" }),
+    ).not.toBeInTheDocument();
+    expect(input).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Close editor" })).toBeEnabled();
+    expect(screen.getByText(/Updating capacity…/)).toBeVisible();
+    expect(screen.getByText(/Ana is within capacity and is hidden/)).toBeVisible();
+    expect(screen.queryByRole("row", { name: /Ana/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /Eli/ })).toBeVisible();
+    expect(
+      within(
+        screen.getByRole("region", { name: "Entire team summary" }),
+      ).getByText("48"),
+    ).toBeVisible();
+
+    await act(async () => refresh.resolve(json(fixture(48))));
+    expect(screen.queryByText(/Updating capacity…/)).not.toBeInTheDocument();
+    expect(screen.getByText("Saved · 48 h/week.")).toBeVisible();
+  });
+
+  it.each([
+    { action: "edit", status: 200 },
+    { action: "edit", status: 500 },
+    { action: "reopen", status: 200 },
+    { action: "reopen", status: 500 },
+  ])(
+    "preserves a newer draft after $action when the automatic refresh returns $status",
+    async ({ action, status }) => {
+      const refresh = deferred<Response>();
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(json(fixture()))
+          .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 32 }))
+          .mockReturnValueOnce(refresh.promise),
+      );
+      render(<CapacityGrid from={query.from} to={query.to} />);
+      fireEvent.change(await openEditor(), { target: { value: "32" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+      await screen.findByText("Saved · 32 h/week.");
+      if (action === "reopen") {
+        fireEvent.click(screen.getByRole("button", { name: "Close editor" }));
+        expect(await openEditor()).toHaveValue("32");
+      }
+      const input = screen.getByRole("textbox", { name: "Weekly hours for Ana" });
+      fireEvent.change(input, { target: { value: "25" } });
+      await act(async () =>
+        refresh.resolve(
+          json(
+            status === 200 ? fixture(32) : { error: "Refresh unavailable." },
+            status,
+          ),
+        ),
+      );
+      expect(input).toHaveValue("25");
+      expect(screen.getByRole("button", { name: "Save capacity" })).toBeEnabled();
+      expect(screen.queryByText(/Saved ·/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/your change is saved/)).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Edit weekly hours for Ana" }),
+      ).toHaveTextContent("32 h / week");
+      if (status === 500)
+        expect(screen.getByRole("button", { name: "Retry refresh" })).toBeEnabled();
+    },
+  );
+
   it("keeps a rejected draft while navigating and lets Cancel restore keyboard focus", async () => {
     const mock = vi
       .fn()
@@ -103,7 +185,7 @@ describe("weekly capacity editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
     expect(
       await screen.findByText(
-        /Saved 0 hours per week. The capacity refresh failed/,
+        /Saved · 0 h\/week. The capacity refresh failed/,
       ),
     ).toBeVisible();
     const row = screen.getByRole("row", { name: /Ana/ });
@@ -132,7 +214,7 @@ describe("weekly capacity editing", () => {
     const input = await openEditor();
     fireEvent.change(input, { target: { value: "32" } });
     fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
-    await screen.findByText(/Saved 32 hours per week. The capacity refresh failed/);
+    await screen.findByText(/Saved · 32 h\/week. The capacity refresh failed/);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry refresh" }));
     fireEvent.change(input, { target: { value: "25" } });
@@ -167,7 +249,7 @@ describe("weekly capacity editing", () => {
     render(<CapacityGrid from={query.from} to={query.to} />);
     fireEvent.change(await openEditor(), { target: { value: "32" } });
     fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
-    await screen.findByText(/Saved 32 hours per week. The capacity refresh failed/);
+    await screen.findByText(/Saved · 32 h\/week. The capacity refresh failed/);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry refresh" }));
     fireEvent.click(screen.getByRole("button", { name: "Close editor" }));
@@ -198,7 +280,7 @@ describe("weekly capacity editing", () => {
     expect(mock).toHaveBeenCalledTimes(1);
     fireEvent.change(input, { target: { value: "32.75" } });
     fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
-    await screen.findByText(/Saved 32.75 hours per week/);
+    await screen.findByText(/Saved · 32.75 h\/week/);
     expect(JSON.parse(mock.mock.calls[1][1].body)).toEqual({
       weekly_hours: 32.75,
     });
@@ -317,6 +399,162 @@ describe("weekly capacity editing", () => {
         .filter(([, init]) => init?.method === "PATCH")
         .map(([, init]) => JSON.parse(init.body)),
     ).toEqual([{ weekly_hours: 20 }, { weekly_hours: 30 }]);
+  });
+});
+
+describe("loading and uncertain values", () => {
+  it("keeps real week headings and unknown totals while hiding old rows during navigation", async () => {
+    const initial = deferred<Response>();
+    const next = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockReturnValueOnce(initial.promise)
+        .mockReturnValueOnce(next.promise),
+    );
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    expect(screen.getByText("Loading team capacity…")).toBeVisible();
+    expect(
+      screen.getByRole("columnheader", {
+        name: /Dec 29 – Jan 4\s*2025 \/ 2026/,
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("region", { name: /Capacity for .* is loading/ }),
+    ).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByRole("row", { name: /Ana/ })).not.toBeInTheDocument();
+    const summary = screen.getByRole("region", { name: "Entire team summary" });
+    expect(within(summary).getAllByText("—")).toHaveLength(4);
+    expect(within(summary).queryByText(/^0/)).not.toBeInTheDocument();
+
+    // Editing an unapplied date must not relabel the in-flight request's columns.
+    fireEvent.change(screen.getByLabelText("From date"), {
+      target: { value: "2026-03-01" },
+    });
+    expect(
+      screen.getByRole("columnheader", { name: /Dec 29 – Jan 4/ }),
+    ).toBeVisible();
+    await act(async () => initial.resolve(json(fixture())));
+    expect(screen.getByRole("row", { name: /Ana/ })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Next week" }));
+    expect(screen.queryByRole("row", { name: /Ana/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: /Dec 29 – Jan 4/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: /Jan 19 – Jan 25\s*2026/ }),
+    ).toBeVisible();
+    expect(within(summary).getAllByText("—")).toHaveLength(4);
+    await act(async () =>
+      next.resolve(
+        json({
+          ...fixture(),
+          from: "2026-01-05",
+          to: "2026-01-25",
+          weeks: [
+            { start: "2026-01-05", end: "2026-01-11" },
+            { start: "2026-01-12", end: "2026-01-18" },
+            { start: "2026-01-19", end: "2026-01-25" },
+          ],
+        }),
+      ),
+    );
+  });
+
+  it("shows one initial error with one retry and preserves the chosen dates", async () => {
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({ error: "Capacity is temporarily unavailable." }, 500),
+      )
+      .mockResolvedValueOnce(json(fixture()));
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "We couldn’t load capacity for these weeks.",
+    );
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Try again" })).toHaveLength(1);
+    expect(screen.queryByText("No capacity data loaded")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry refresh" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("From date")).toHaveValue(query.from);
+    expect(screen.getByLabelText("To date")).toHaveValue(query.to);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByRole("row", { name: /Ana/ });
+    expect(mock.mock.calls[0][0]).toBe(mock.mock.calls[1][0]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("qualifies an empty overload filter until a slow or failed refresh recovers", async () => {
+    const refresh = deferred<Response>();
+    const singlePerson = (weeklyHours: number) => ({
+      ...fixture(weeklyHours),
+      people: [fixture(weeklyHours).people[0]],
+    });
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(singlePerson(40)))
+      .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 48 }))
+      .mockReturnValueOnce(refresh.promise)
+      .mockResolvedValueOnce(json(singlePerson(48)));
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    fireEvent.change(await openEditor(), { target: { value: "48" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Over capacity only" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText("Saved · 48 h/week.");
+    expect(
+      screen.getByRole("heading", {
+        name: "No over-capacity matches in the values shown",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("✓")).not.toBeInTheDocument();
+    expect(screen.queryByText("No one is over capacity")).not.toBeInTheDocument();
+    await act(async () => refresh.resolve(json({ error: "Offline" }, 500)));
+    expect(
+      screen.getByRole("heading", {
+        name: "No over-capacity matches in the values shown",
+      }),
+    ).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "Retry refresh" })).toHaveLength(1);
+    expect(screen.queryByText("✓")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry refresh" }));
+    expect(
+      await screen.findByRole("heading", { name: "No one is over capacity" }),
+    ).toBeVisible();
+    expect(screen.getByText("✓")).toBeVisible();
+    expect(
+      mock.mock.calls.filter(([, init]) => init?.method === "PATCH"),
+    ).toHaveLength(1);
+  });
+
+  it("does not give an all-clear for empty results while a save is unconfirmed", async () => {
+    const data = { ...fixture(48), people: [fixture(48).people[0]] };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(json(data))
+        .mockRejectedValueOnce(new TypeError("Response lost")),
+    );
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    fireEvent.change(await openEditor(), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/We could not confirm whether your change was saved/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Over capacity only" }));
+    expect(
+      screen.getByRole("heading", {
+        name: "No over-capacity matches in the values shown",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("No one is over capacity")).not.toBeInTheDocument();
+    expect(screen.queryByText("✓")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Weekly hours for Ana" }),
+    ).toHaveValue("20");
   });
 });
 

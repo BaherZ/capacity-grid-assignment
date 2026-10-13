@@ -673,6 +673,44 @@ main {
 .table-stale {
   background: #f6f6f8;
 }
+.skeleton-block {
+  display: block;
+  border-radius: 3px;
+  background: #edf0f4;
+  max-width: 100%;
+}
+.capacity-skeleton .skeleton-avatar {
+  background: #edf0f4;
+  border-color: #e8ecf1;
+}
+.skeleton-person {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+}
+.skeleton-name {
+  width: 125px;
+  height: 11px;
+}
+.skeleton-capacity {
+  width: 80px;
+  height: 8px;
+}
+.skeleton-hours {
+  width: 88px;
+  height: 15px;
+  margin-block: 3px;
+}
+.capacity-skeleton .skeleton-bar {
+  background: #f1f3f6;
+}
+.skeleton-note {
+  display: inline-block;
+  width: 76px;
+  height: 8px;
+}
 .grid-footer {
   border-top: 1px solid #e7e9ef;
   display: flex;
@@ -739,28 +777,14 @@ main {
   color: #697382;
   max-width: 420px;
 }
-.empty-state .text-button {
+.empty-state .text-button,
+.empty-state .button {
   margin-top: 14px;
 }
 .empty-mark {
   font-size: 23px;
   color: #8ba599;
   margin-bottom: 12px;
-}
-.loading-ring {
-  display: block;
-  width: 25px;
-  height: 25px;
-  border: 2px solid #e3e0ee;
-  border-top-color: #7765b2;
-  border-radius: 50%;
-  animation: spin 0.85s linear infinite;
-  margin: 0 auto 16px;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 .editor-panel {
   display: flex;
@@ -1109,8 +1133,10 @@ main {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  * {
-    animation-duration: 0.01ms !important;
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
     transition: none !important;
   }
 }

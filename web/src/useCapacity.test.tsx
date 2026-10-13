@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CapacityData, CapacityQuery } from "./capacity";
-import { useCapacity } from "./useCapacity";
+import { useCapacity, type SaveResult } from "./useCapacity";
 
 const first: CapacityQuery = {
   from: "2026-01-05",
@@ -43,6 +43,110 @@ afterEach(() => {
 });
 
 describe("capacity request ordering", () => {
+  it("confirms a save and releases the save guard before its refresh finishes", async () => {
+    const patch = deferred<Response>();
+    const freshRead = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(json(data(first)))
+        .mockReturnValueOnce(patch.promise)
+        .mockReturnValueOnce(freshRead.promise),
+    );
+    const { result } = renderHook(() => useCapacity(first));
+    await waitFor(() => expect(result.current.current).not.toBeNull());
+    let save!: ReturnType<typeof result.current.save>;
+    let saved: SaveResult | undefined;
+    act(() => {
+      save = result.current.save(1, 32.5);
+      void save.then((value) => {
+        saved = value;
+      });
+    });
+    expect(result.current.saving).toBe(true);
+    expect(result.current.current?.people[0].weekly_hours).toBe(40);
+
+    await act(async () => {
+      patch.resolve(json({ id: 1, name: "Ana", weekly_hours: 32.5 }));
+    });
+    // The refresh deliberately remains pending: confirmation must not wait for it.
+    expect(saved?.kind).toBe("saved");
+    expect(result.current.saving).toBe(false);
+    expect(result.current.loading).toBe(true);
+    expect(result.current.current?.people[0].weekly_hours).toBe(32.5);
+    if (saved?.kind !== "saved") throw new Error("Expected a confirmed save");
+    const refresh = saved.refresh;
+
+    await act(async () => {
+      freshRead.reject(new Error("Refresh unavailable"));
+      expect(await refresh).toEqual({ error: "Refresh unavailable" });
+    });
+    expect(result.current.current?.people[0].weekly_hours).toBe(32.5);
+    expect(result.current.saving).toBe(false);
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe("Refresh unavailable");
+  });
+
+  it("allows a newer save while refreshing and ignores the older refresh afterward", async () => {
+    const olderRead = deferred<Response>();
+    const newerPatch = deferred<Response>();
+    const newerRead = deferred<Response>();
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(data(first)))
+      .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 32 }))
+      .mockReturnValueOnce(olderRead.promise)
+      .mockReturnValueOnce(newerPatch.promise)
+      .mockReturnValueOnce(newerRead.promise);
+    vi.stubGlobal("fetch", mock);
+    const { result } = renderHook(() => useCapacity(first));
+    await waitFor(() => expect(result.current.current).not.toBeNull());
+    let olderSave: SaveResult | undefined;
+    await act(async () => {
+      olderSave = await result.current.save(1, 32);
+    });
+    expect(olderSave?.kind).toBe("saved");
+    expect(result.current.saving).toBe(false);
+    expect(result.current.loading).toBe(true);
+    if (olderSave?.kind !== "saved") throw new Error("Expected a confirmed save");
+    const olderRefresh = olderSave.refresh;
+
+    let save!: ReturnType<typeof result.current.save>;
+    act(() => {
+      save = result.current.save(1, 48);
+    });
+    expect(mock.mock.calls[3][1].method).toBe("PATCH");
+    expect(result.current.saving).toBe(true);
+    expect(result.current.current?.people[0].weekly_hours).toBe(32);
+
+    let newerSave: SaveResult | undefined;
+    await act(async () => {
+      newerPatch.resolve(json({ id: 1, name: "Ana", weekly_hours: 48 }));
+      newerSave = await save;
+    });
+    expect(newerSave?.kind).toBe("saved");
+    expect(result.current.current?.people[0].weekly_hours).toBe(48);
+    expect(result.current.saving).toBe(false);
+    if (newerSave?.kind !== "saved") throw new Error("Expected a confirmed save");
+    const newerRefresh = newerSave.refresh;
+
+    await act(async () => {
+      olderRead.resolve(json(data(first, 32)));
+      expect(await olderRefresh).toEqual({ obsolete: true });
+    });
+    expect(result.current.current?.people[0].weekly_hours).toBe(48);
+    expect(result.current.loading).toBe(true);
+    expect(result.current.error).toBeNull();
+
+    await act(async () => {
+      newerRead.resolve(json(data(first, 48)));
+      await newerRefresh;
+    });
+    expect(result.current.current?.people[0].weekly_hours).toBe(48);
+    expect(result.current.loading).toBe(false);
+  });
+
   it("ignores a late response and late failure after a newer range loads", async () => {
     const oldRead = deferred<Response>();
     const oldRefresh = deferred<Response>();

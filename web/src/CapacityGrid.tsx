@@ -19,6 +19,7 @@ import {
   type Workweek,
 } from "./capacity";
 import { useCapacity } from "./useCapacity";
+import { CapacityLoading } from "./CapacityLoading";
 
 type Props = { from: string; to: string };
 type Draft = {
@@ -194,15 +195,36 @@ export function CapacityGrid({ from, to }: Props) {
     updateDraft(id, { status: "saving", message: "", validation: undefined });
     const result = await capacity.save(id, parsed);
     if (result.kind === "saved") {
-      updateDraft(id, {
-        status: result.refreshFailed ? "saved-refresh-failed" : "saved",
+      const savedDraft: Draft = {
+        ...editor,
+        status: "saved",
         original: result.person.weekly_hours,
         value: String(result.person.weekly_hours),
+        validation: undefined,
         unconfirmed: undefined,
         checked: false,
-        message: result.refreshFailed
-          ? `Saved ${hours(result.person.weekly_hours)} hours per week. The capacity refresh failed; retry the refresh to check the latest allocations.`
-          : `Saved ${hours(result.person.weekly_hours)} hours per week. Capacity is updated across all weeks.`,
+        message: `Saved · ${hours(result.person.weekly_hours)} h/week.`,
+      };
+      setDrafts((previous) =>
+        previous[id] ? { ...previous, [id]: savedDraft } : previous,
+      );
+
+      // Saving is complete. Refresh feedback belongs only to this exact draft;
+      // the manager can now edit again, close the editor, or move to other weeks.
+      const refreshed = await result.refresh;
+      if (refreshed.obsolete) return;
+      setDrafts((previous) => {
+        if (previous[id] !== savedDraft) return previous;
+        return {
+          ...previous,
+          [id]: {
+            ...savedDraft,
+            status: refreshed.error ? "saved-refresh-failed" : "saved",
+            message: refreshed.error
+              ? `${savedDraft.message} The capacity refresh failed; your change is saved.`
+              : savedDraft.message,
+          },
+        };
       });
     } else {
       updateDraft(id, {
@@ -300,6 +322,15 @@ export function CapacityGrid({ from, to }: Props) {
   const isUnconfirmed = Boolean(editor?.unconfirmed);
   const readBlocked =
     capacity.loading || Boolean(capacity.error) || unconfirmedDrafts.length > 0;
+  const savedPerson = isSaved
+    ? data?.people.find((person) => person.id === editor?.id)
+    : undefined;
+  const savedPersonHidden =
+    overOnly &&
+    savedPerson &&
+    savedPerson.weekly_hours === editor?.original &&
+    savedPerson.allocated_hours.every((value) => value <= savedPerson.weekly_hours);
+  const unfilteredOverOnly = overOnly && !search.trim();
 
   return (
     <>
@@ -546,6 +577,12 @@ export function CapacityGrid({ from, to }: Props) {
                 role={editor.status === "rejected" ? "alert" : "status"}
               >
                 <p id="save-message">{editor.message}</p>
+                {savedPersonHidden && (
+                  <p>
+                    With the shown allocations, {editor.name} is within capacity
+                    and is hidden by the over-capacity filter.
+                  </p>
+                )}
                 {isUnconfirmed && (
                   <button
                     type="button"
@@ -627,8 +664,8 @@ export function CapacityGrid({ from, to }: Props) {
         <div className="read-status" aria-live="polite" aria-atomic="true">
           {capacity.loading
             ? data
-              ? "Refreshing capacity… Shown values may be out of date."
-              : "Loading capacity for the selected weeks…"
+              ? "Updating capacity… Shown allocations may be out of date."
+              : "Loading team capacity…"
             : unconfirmedDrafts.length > 0
               ? "A save is unconfirmed. Shown values may still change; review the unconfirmed change below."
               : capacity.error
@@ -659,55 +696,62 @@ export function CapacityGrid({ from, to }: Props) {
             ))}
           </div>
         )}
-        {capacity.error && (
+        {capacity.error && data && (
           <div className="load-error" role="alert">
             <div>
-              <strong>Capacity could not be refreshed.</strong>
+              <strong>Couldn’t update capacity.</strong>
               <p>
-                {capacity.error}{" "}
-                {data
-                  ? "Previously loaded values are shown and may be out of date."
-                  : ""}
+                Showing previously loaded allocations with any confirmed capacity
+                changes. These values may be out of date.
               </p>
             </div>
-            <button
-              type="button"
-              className="button"
-              onClick={() => void capacity.refresh()}
-            >
-              Retry load
-            </button>
+            {editor?.status !== "saved-refresh-failed" && (
+              <button
+                type="button"
+                className="button"
+                onClick={() => void capacity.refresh()}
+              >
+                Retry refresh
+              </button>
+            )}
           </div>
         )}
         {!data ? (
-          <div className="empty-state">
-            {capacity.loading ? (
-              <>
-                <span className="loading-ring" aria-hidden="true" />
-                <h3>Loading your team’s capacity</h3>
-                <p>Matching people and allocations to the selected weeks.</p>
-              </>
-            ) : (
-              <>
-                <h3>No capacity data loaded</h3>
-                <p>Retry loading to view this date range.</p>
-              </>
-            )}
-          </div>
+          capacity.loading ? (
+            <CapacityLoading from={effective.from} to={effective.to} />
+          ) : (
+            <div className="empty-state" role="alert">
+              <h3>We couldn’t load capacity for these weeks.</h3>
+              <p>{capacity.error || "Please try again."}</p>
+              <button
+                type="button"
+                className="button"
+                onClick={() => void capacity.refresh()}
+              >
+                Try again
+              </button>
+            </div>
+          )
         ) : filtered.length === 0 ? (
           <div className="empty-state">
             <span className="empty-mark" aria-hidden="true">
-              {overOnly && !search ? "✓" : "⌕"}
+              {unfilteredOverOnly && !readBlocked ? "✓" : "⌕"}
             </span>
             <h3>
-              {overOnly && !search
-                ? "No one is over capacity"
-                : "No people match your filters"}
+              {unfilteredOverOnly
+                ? readBlocked
+                  ? "No over-capacity matches in the values shown"
+                  : "No one is over capacity"
+                : readBlocked
+                  ? "No matches in the values shown"
+                  : "No people match your filters"}
             </h3>
             <p>
-              {overOnly && !search
-                ? "Across the entire roster, everyone is within capacity for these weeks."
-                : "Try a different name or turn off the capacity filter."}
+              {readBlocked
+                ? "Shown values may still change. Check the update status before relying on these results."
+                : unfilteredOverOnly
+                  ? "Across the entire roster, everyone is within capacity for these weeks."
+                  : "Try a different name or turn off the capacity filter."}
             </p>
             <button
               className="text-button"

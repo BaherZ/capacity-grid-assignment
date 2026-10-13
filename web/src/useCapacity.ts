@@ -12,12 +12,16 @@ type ReadState = {
   loading: boolean;
   error: string | null;
 };
-type ReadResult = { data?: CapacityData; error?: string; obsolete?: boolean };
+export type ReadResult = {
+  data?: CapacityData;
+  error?: string;
+  obsolete?: boolean;
+};
 export type SaveResult =
   | {
       kind: "saved";
       person: Pick<Person, "id" | "name" | "weekly_hours">;
-      refreshFailed: boolean;
+      refresh: Promise<ReadResult>;
     }
   | { kind: "rejected" | "unconfirmed"; message: string };
 
@@ -176,8 +180,9 @@ export function useCapacity(query: CapacityQuery) {
               : null,
           }));
         }
-        const result = await refresh();
-        return { kind: "saved", person, refreshFailed: Boolean(result.error) };
+        // The write is confirmed; refreshing its surrounding data is separate work.
+        // Return immediately so a slow read cannot keep the editor in "Saving…".
+        return { kind: "saved", person, refresh: refresh() };
       } catch {
         return unknownOutcome();
       } finally {

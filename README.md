@@ -136,6 +136,11 @@ invalid input, 404 for an unknown person, and 500 for database failures. Reads b
 HTTP caching. A lost save response is treated as an unconfirmed outcome; a failed
 refresh after a confirmed save does not invite a second write.
 
+Save confirmation appears as soon as PATCH succeeds. Its returned capacity updates
+the grid and team summary together, while the allocation refresh runs separately.
+Loading new weeks shows placeholders under their actual dates. Existing values stay
+readable during refresh, with uncertainty stated in both status and empty results.
+
 The editing flow protects against obsolete reads and overlapping writes in this
 view. Concurrent edits from separate browsers use last-write-wins; the fixed schema
 has no capacity history or revision field.
