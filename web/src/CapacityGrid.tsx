@@ -20,6 +20,12 @@ import {
 } from "./capacity";
 import { useCapacity } from "./useCapacity";
 import { CapacityLoading } from "./CapacityLoading";
+import {
+  currentWeekRange,
+  readView,
+  viewURL,
+  type CapacityView,
+} from "./viewState";
 
 type Props = { from: string; to: string };
 type Draft = {
@@ -27,12 +33,7 @@ type Draft = {
   name: string;
   value: string;
   original: number;
-  status:
-    | "editing"
-    | "saving"
-    | "rejected"
-    | "saved"
-    | "saved-refresh-failed";
+  status: "editing" | "saving" | "rejected" | "saved" | "saved-refresh-failed";
   message: string;
   validation?: string;
   // A rejected retry or invalid draft does not resolve an earlier write.
@@ -61,17 +62,62 @@ function Arrow({ direction }: { direction: "left" | "right" }) {
 }
 
 export function CapacityGrid({ from, to }: Props) {
-  const [query, setQuery] = useState<CapacityQuery>({
-    from,
-    to,
-    workweek: "mon-fri",
-  });
+  const defaults = useRef<CapacityQuery>({ from, to, workweek: "mon-fri" });
+  const [view, setView] = useState(() =>
+    readView(defaults.current, window.location.search),
+  );
+  const historyMode = useRef<"push" | "replace" | null>("replace");
+  const query = useMemo<CapacityQuery>(
+    () => ({
+      from: view.from,
+      to: view.to,
+      workweek: view.workweek,
+    }),
+    [view.from, view.to, view.workweek],
+  );
   const [rangeDraft, setRangeDraft] = useState(query);
   const [validation, setValidation] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [overOnly, setOverOnly] = useState(false);
-  const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState(25);
+  const search = view.q;
+  const overOnly = view.over;
+  const page = view.page - 1;
+  const pageSize = view.limit;
+
+  function changeView(change: Partial<CapacityView>, replace = false) {
+    historyMode.current = replace ? "replace" : "push";
+    setView((previous) => ({ ...previous, ...change }));
+  }
+  const setQuery = (next: CapacityQuery) => changeView({ ...next, page: 1 });
+  const setSearch = (q: string) => changeView({ q, page: 1 }, true);
+  const setOverOnly = (over: boolean) => changeView({ over, page: 1 });
+  const setPage = (next: number) => changeView({ page: next + 1 });
+  const setPageSize = (limit: number) => changeView({ limit, page: 1 });
+
+  useEffect(() => {
+    const next = viewURL(view, window.location.href);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (historyMode.current && next !== current) {
+      if (historyMode.current === "replace")
+        window.history.replaceState(null, "", next);
+      else window.history.pushState(null, "", next);
+    }
+    historyMode.current = null;
+  }, [view]);
+
+  useEffect(() => {
+    const restore = () => {
+      historyMode.current = null;
+      const restored = readView(defaults.current, window.location.search);
+      setView(restored);
+      setRangeDraft({
+        from: restored.from,
+        to: restored.to,
+        workweek: restored.workweek,
+      });
+      setValidation(null);
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
   const [drafts, setDrafts] = useState<Record<number, Draft>>({});
   const [activeEditor, setActiveEditor] = useState<number | null>(null);
   const [checking, setChecking] = useState(false);
@@ -126,6 +172,12 @@ export function CapacityGrid({ from, to }: Props) {
     (currentPage + 1) * pageSize,
   );
 
+  useEffect(() => {
+    if (data && !capacity.loading && currentPage !== page) {
+      changeView({ page: currentPage + 1 }, true);
+    }
+  }, [data, capacity.loading, currentPage, page]);
+
   useLayoutEffect(() => {
     // Begin each set of people at its first row, keeping the same weeks in view.
     if (tableScroll.current) tableScroll.current.scrollTop = 0;
@@ -137,7 +189,6 @@ export function CapacityGrid({ from, to }: Props) {
     setValidation(error);
     if (!error) {
       setQuery(rangeDraft);
-      setPage(0);
     }
   }
 
@@ -152,7 +203,6 @@ export function CapacityGrid({ from, to }: Props) {
     if (!error) {
       setQuery(next);
       setRangeDraft(next);
-      setPage(0);
     }
   }
 
@@ -303,7 +353,7 @@ export function CapacityGrid({ from, to }: Props) {
   }
 
   function closeEditor() {
-    if (!editor || capacity.saving) return;
+    if (!editor || capacity.saving || checking) return;
     // An unconfirmed draft survives dismissing the panel and opening it again.
     if (!editor.unconfirmed) {
       setDrafts((previous) => {
@@ -329,7 +379,9 @@ export function CapacityGrid({ from, to }: Props) {
     overOnly &&
     savedPerson &&
     savedPerson.weekly_hours === editor?.original &&
-    savedPerson.allocated_hours.every((value) => value <= savedPerson.weekly_hours);
+    savedPerson.allocated_hours.every(
+      (value) => value <= savedPerson.weekly_hours,
+    );
   const unfilteredOverOnly = overOnly && !search.trim();
 
   return (
@@ -425,6 +477,26 @@ export function CapacityGrid({ from, to }: Props) {
         <div className="week-navigation">
           <button
             type="button"
+            className="button"
+            onClick={() => {
+              const next = currentWeekRange(query);
+              setValidation(null);
+              setQuery(next);
+              setRangeDraft(next);
+            }}
+          >
+            This week
+          </button>
+          <button
+            type="button"
+            className="button"
+            disabled={capacity.loading || capacity.saving || checking}
+            onClick={() => void capacity.refresh()}
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
             className="button button-icon"
             aria-label="Previous week"
             onClick={() => moveRange(-7)}
@@ -494,10 +566,18 @@ export function CapacityGrid({ from, to }: Props) {
         <section
           className="editor-panel"
           aria-label={`Edit capacity for ${editor.name}`}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !capacity.saving && !checking) {
+              event.preventDefault();
+              closeEditor();
+            }
+          }}
         >
           <div className="editor-intro">
             <p className="eyebrow">EDIT WEEKLY CAPACITY</p>
-            <h3>{editor.name}</h3>
+            <h3>
+              <bdi>{editor.name}</bdi>
+            </h3>
             <p>
               This changes capacity for all past and future weeks.
               <br />
@@ -638,10 +718,10 @@ export function CapacityGrid({ from, to }: Props) {
               type="search"
               aria-label="Search all people"
               placeholder="Search all people…"
+              maxLength={100}
               value={search}
               onChange={(event) => {
                 setSearch(event.target.value);
-                setPage(0);
               }}
             />
           </div>
@@ -651,7 +731,6 @@ export function CapacityGrid({ from, to }: Props) {
               checked={overOnly}
               onChange={(event) => {
                 setOverOnly(event.target.checked);
-                setPage(0);
               }}
             />
             <span>Over capacity only</span>
@@ -701,8 +780,8 @@ export function CapacityGrid({ from, to }: Props) {
             <div>
               <strong>Couldn’t update capacity.</strong>
               <p>
-                Showing previously loaded allocations with any confirmed capacity
-                changes. These values may be out of date.
+                Showing previously loaded allocations with any confirmed
+                capacity changes. These values may be out of date.
               </p>
             </div>
             {editor?.status !== "saved-refresh-failed" && (
@@ -757,9 +836,7 @@ export function CapacityGrid({ from, to }: Props) {
               className="text-button"
               type="button"
               onClick={() => {
-                setSearch("");
-                setOverOnly(false);
-                setPage(0);
+                changeView({ q: "", over: false, page: 1 });
               }}
             >
               Clear filters
@@ -822,7 +899,7 @@ export function CapacityGrid({ from, to }: Props) {
                           </span>
                           <div className="person-detail">
                             <span className="person-name" title={person.name}>
-                              {person.name}
+                              <bdi>{person.name}</bdi>
                             </span>
                             <button
                               type="button"
@@ -939,7 +1016,6 @@ export function CapacityGrid({ from, to }: Props) {
                     value={pageSize}
                     onChange={(event) => {
                       setPageSize(Number(event.target.value));
-                      setPage(0);
                     }}
                   >
                     <option value={25}>25</option>

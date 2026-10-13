@@ -44,17 +44,25 @@ afterEach(() => {
 
 describe("capacity request ordering", () => {
   it("keeps loaded values after malformed refresh data and recovers on retry", async () => {
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(json(data(first)))
-      .mockResolvedValueOnce(json({ ...data(first), people: null }))
-      .mockResolvedValueOnce(json(data(first, 32))));
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(json(data(first)))
+        .mockResolvedValueOnce(json({ ...data(first), people: null }))
+        .mockResolvedValueOnce(json(data(first, 32))),
+    );
     const { result } = renderHook(() => useCapacity(first));
     await waitFor(() => expect(result.current.current).not.toBeNull());
-    await act(async () => { await result.current.refresh(); });
+    await act(async () => {
+      await result.current.refresh();
+    });
     expect(result.current.error).toMatch(/Capacity data/);
     expect(result.current.current?.people[0].weekly_hours).toBe(40);
     expect(result.current.loading).toBe(false);
-    await act(async () => { await result.current.refresh(); });
+    await act(async () => {
+      await result.current.refresh();
+    });
     expect(result.current.error).toBeNull();
     expect(result.current.current?.people[0].weekly_hours).toBe(32);
   });
@@ -62,7 +70,8 @@ describe("capacity request ordering", () => {
   it("does not confirm or apply a successful response for a different person", async () => {
     const olderRead = deferred<Response>();
     const patch = deferred<Response>();
-    const mock = vi.fn()
+    const mock = vi
+      .fn()
       .mockResolvedValueOnce(json(data(first)))
       .mockReturnValueOnce(patch.promise)
       .mockReturnValueOnce(olderRead.promise);
@@ -155,7 +164,8 @@ describe("capacity request ordering", () => {
     expect(olderSave?.kind).toBe("saved");
     expect(result.current.saving).toBe(false);
     expect(result.current.loading).toBe(true);
-    if (olderSave?.kind !== "saved") throw new Error("Expected a confirmed save");
+    if (olderSave?.kind !== "saved")
+      throw new Error("Expected a confirmed save");
     const olderRefresh = olderSave.refresh;
 
     let save!: ReturnType<typeof result.current.save>;
@@ -174,7 +184,8 @@ describe("capacity request ordering", () => {
     expect(newerSave?.kind).toBe("saved");
     expect(result.current.current?.people[0].weekly_hours).toBe(48);
     expect(result.current.saving).toBe(false);
-    if (newerSave?.kind !== "saved") throw new Error("Expected a confirmed save");
+    if (newerSave?.kind !== "saved")
+      throw new Error("Expected a confirmed save");
     const newerRefresh = newerSave.refresh;
 
     await act(async () => {
