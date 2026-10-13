@@ -77,9 +77,10 @@ INSERT INTO assignments SELECT 4, '2026-01-05', '2026-01-09', 0.00625 FROM gener
 			if response.From != test.from || response.To != test.to || len(response.People) != 4 || len(response.Weeks) != 2 {
 				t.Fatalf("unexpected response shape: %+v", response)
 			}
+			wantOrder := []int{1, 2, 4, 3} // Ana, Eli, Fractional, No assignments.
 			for index, person := range response.People {
-				if person.ID != index+1 || !reflect.DeepEqual(person.AllocatedHours, test.want[index]) {
-					t.Errorf("person %+v: want allocations %v", person, test.want[index])
+				if person.ID != wantOrder[index] || !reflect.DeepEqual(person.AllocatedHours, test.want[person.ID-1]) {
+					t.Errorf("person %+v: want ID %d and allocations %v", person, wantOrder[index], test.want[person.ID-1])
 				}
 			}
 		})
@@ -115,4 +116,34 @@ INSERT INTO assignments SELECT 4, '2026-01-05', '2026-01-09', 0.00625 FROM gener
 	if got := read("from=2026-01-01&to=2026-01-01").People[0].WeeklyHours; got != 20.01 {
 		t.Fatalf("rejected update changed saved hours: %v", got)
 	}
+
+	t.Run("alphabetical roster uses Unicode ordering with stable name ties", func(t *testing.T) {
+		// Fixture IDs deliberately conflict with alphabetic order. These remain
+		// connection-local temporary tables; the application's roster is untouched.
+		_, err := db.Exec(context.Background(), `
+DELETE FROM assignments;
+DELETE FROM people;
+INSERT INTO people VALUES
+    (30, 'Zoe', 40), (20, 'Émile', 0), (25, 'Ana', 20),
+    (9, 'Álvaro', 32), (4, 'Ana', 40), (50, 'Aaron', 40), (8, 'alba', 40);
+INSERT INTO assignments VALUES (20, '2026-01-05', '2026-01-09', 4);
+`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := read("from=2026-01-05&to=2026-01-18")
+		wantIDs := []int{50, 8, 9, 4, 25, 20, 30}
+		if len(response.People) != len(wantIDs) || len(response.Weeks) != 2 {
+			t.Fatalf("sorting must retain the entire roster and week axis: %+v", response)
+		}
+		for index, person := range response.People {
+			wantHours := []float64{0, 0}
+			if person.ID == 20 {
+				wantHours[0] = 20
+			}
+			if person.ID != wantIDs[index] || !reflect.DeepEqual(person.AllocatedHours, wantHours) {
+				t.Errorf("row %d: got %+v; want ID %d and hours %v", index, person, wantIDs[index], wantHours)
+			}
+		}
+	})
 }
