@@ -103,3 +103,75 @@ We spend about ten minutes per submission, on:
 Then we talk about it for an hour, live, and extend it together. Come ready to explain
 what you decided and why — that conversation is the real point of this exercise, and it's
 much easier when the notes are honest about what you didn't get to.
+
+## Capacity view behavior
+
+- Date selections include every intersecting **complete week**. The displayed range
+  shows the effective boundaries. Previous/next moves the selection seven days.
+- **This week** returns to the viewer's current week while preserving the number
+  of complete weeks selected and the working-week preset. **Refresh** reloads the
+  applied range without clearing filters or capacity drafts.
+- The URL stores the applied dates, working-week preset, name search, over-capacity
+  filter, people page, and rows per page. Reloading or sharing a link restores the
+  view; Back and Forward restore committed navigation. Search typing replaces the
+  current history entry. Unsaved date and capacity drafts stay out of the URL.
+- People appear in language-neutral Unicode alphabetical order, with IDs breaking
+  identical-name ties. Names are isolated for mixed writing directions. Escape
+  cancels editing and restores focus, while preserving any unconfirmed save; an
+  active save or read-back check must finish before dismissing the editor.
+- The workweek preset applies to everyone in this view: **Monday–Friday** uses
+  Monday-start weeks; **Sunday–Thursday** uses Sunday-start weeks. Assignment start
+  and end dates are inclusive, and only the preset's five working days contribute.
+  There is no holiday, leave, or individual working-pattern data in the scaffold.
+- All assignment rows contribute, including rows with identical-looking values.
+  Allocation is planned work, not logged time. The warning compares weekly totals.
+- Weekly hours are a person's capacity for every displayed week. Editing them changes
+  the baseline for past and future weeks; it does not change assignments. Zero is
+  valid. The editor accepts 0–168 hours with up to two decimal places.
+- Date ranges can cover up to 106 complete weeks, including any two-year span.
+  Search, the over-capacity filter, and summary figures use the full loaded roster;
+  pagination only limits the rows rendered at once.
+
+### API contract
+
+`GET /api/capacity?from=2025-12-29&to=2026-01-16&workweek=mon-fri`
+returns the effective `from`/`to`, selected `workweek`, shared `weeks` containing
+`start`/`end` dates, and every person with `id`, `name`, `weekly_hours`, and an
+`allocated_hours` array in exactly the same order as `weeks`. `weekly_hours` is
+the capacity for each complete week. This keeps names, dates, and constant capacity
+from being repeated in every cell. Omitting `workweek` selects `mon-fri`.
+
+`PATCH /api/people/{id}` accepts `{"weekly_hours":32.5}` and returns the saved
+`id`, `name`, and `weekly_hours`. Errors use `{"error":"message"}` with 400 for
+invalid input, 404 for an unknown person, and 500 for database failures. Reads bypass
+HTTP caching. A lost save response is treated as an unconfirmed outcome; a failed
+refresh after a confirmed save does not invite a second write.
+
+The client validates successful responses before using them: dates and the workweek
+must match the request, each person must have a unique ID and one finite nonnegative
+allocation per week, and save confirmations must identify the edited person. Invalid
+reads leave previously loaded values available with a refresh error. An invalid save
+confirmation remains unconfirmed because the write may already have committed.
+
+Save confirmation appears as soon as PATCH succeeds. Its returned capacity updates
+the grid and team summary together, while the allocation refresh runs separately.
+Loading new weeks shows placeholders under their actual dates. Existing values stay
+readable during refresh, with uncertainty stated in both status and empty results.
+
+The editing flow protects against obsolete reads and overlapping writes in this
+view. Concurrent edits from separate browsers use last-write-wins; the fixed schema
+has no capacity history or revision field.
+
+### Checks
+
+With the standard Compose stack running:
+
+```bash
+docker compose exec web npm test
+docker compose exec web npm run build
+docker compose exec api sh -c 'TEST_DATABASE_URL="$DATABASE_URL" go test ./...'
+```
+
+The API image includes the Go toolchain and source, so no local installation is
+needed. Rebuild the API image after changing backend code or tests. The PostgreSQL
+test uses connection-local temporary tables, leaving the seeded data intact.
