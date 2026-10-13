@@ -23,12 +23,13 @@ type Draft = {
     | "editing"
     | "saving"
     | "rejected"
-    | "unconfirmed"
     | "saved"
     | "saved-refresh-failed";
   message: string;
+  validation?: string;
+  // A rejected retry or invalid draft does not resolve an earlier write.
+  unconfirmed?: { submitted: number };
   checked?: boolean;
-  submitted?: number;
 };
 
 function Arrow({ direction }: { direction: "left" | "right" }) {
@@ -74,7 +75,7 @@ export function CapacityGrid({ from, to }: Props) {
   const effective = normalizeRange(query);
   const editor = activeEditor === null ? null : drafts[activeEditor];
   const unconfirmedDrafts = Object.values(drafts).filter(
-    (draft) => draft.status === "unconfirmed",
+    (draft) => draft.unconfirmed !== undefined,
   );
 
   useEffect(() => {
@@ -158,10 +159,11 @@ export function CapacityGrid({ from, to }: Props) {
   }
 
   function updateDraft(id: number, change: Partial<Draft>) {
-    setDrafts((previous) => ({
-      ...previous,
-      [id]: { ...previous[id], ...change },
-    }));
+    setDrafts((previous) =>
+      previous[id]
+        ? { ...previous, [id]: { ...previous[id], ...change } }
+        : previous,
+    );
   }
 
   async function saveHours(event: FormEvent) {
@@ -170,20 +172,20 @@ export function CapacityGrid({ from, to }: Props) {
     const parsed = parseWeeklyHours(editor.value);
     if (parsed === null) {
       updateDraft(editor.id, {
-        status: "rejected",
-        message:
+        validation:
           "Enter a number from 0 to 168, with up to two decimal places. Blank is not zero.",
       });
       return;
     }
     const id = editor.id;
-    updateDraft(id, { status: "saving", message: "", submitted: parsed });
+    updateDraft(id, { status: "saving", message: "", validation: undefined });
     const result = await capacity.save(id, parsed);
     if (result.kind === "saved") {
       updateDraft(id, {
         status: result.refreshFailed ? "saved-refresh-failed" : "saved",
         original: result.person.weekly_hours,
         value: String(result.person.weekly_hours),
+        unconfirmed: undefined,
         checked: false,
         message: result.refreshFailed
           ? `Saved ${hours(result.person.weekly_hours)} hours per week. The capacity refresh failed; retry the refresh to check the latest allocations.`
@@ -191,18 +193,25 @@ export function CapacityGrid({ from, to }: Props) {
       });
     } else {
       updateDraft(id, {
-        status: result.kind,
-        message: result.message,
+        status: result.kind === "rejected" ? "rejected" : "editing",
+        unconfirmed:
+          result.kind === "unconfirmed"
+            ? { submitted: parsed }
+            : editor.unconfirmed,
+        message:
+          result.kind === "rejected" && editor.unconfirmed
+            ? `${result.message} Your earlier save is still unconfirmed. Check the current value before saving again.`
+            : result.message,
         checked: false,
       });
     }
   }
 
   async function checkLatest() {
-    if (!editor) return;
+    if (!editor?.unconfirmed || capacity.saving || checking) return;
     const id = editor.id;
     const draft = editor.value;
-    const submitted = editor.submitted;
+    const submitted = editor.unconfirmed.submitted;
     setChecking(true);
     const result = await capacity.refresh();
     setChecking(false);
@@ -218,6 +227,7 @@ export function CapacityGrid({ from, to }: Props) {
         updateDraft(id, {
           status: unchangedDraft ? "saved" : "editing",
           original: person.weekly_hours,
+          unconfirmed: undefined,
           checked: true,
           message: unchangedDraft
             ? `The current server value is ${hours(person.weekly_hours)} hours per week and matches your draft.`
@@ -238,13 +248,21 @@ export function CapacityGrid({ from, to }: Props) {
   }
 
   async function retryRefresh() {
-    const id = editor?.id;
+    const draft = editor;
     const result = await capacity.refresh();
-    if (id !== undefined && result.data) {
-      updateDraft(id, {
-        status: "saved",
-        message:
-          "Your change was saved. The latest capacity has now been loaded.",
+    if (draft && result.data) {
+      setDrafts((previous) => {
+        // Refreshing allocations must not mark a newer draft saved or reopen one.
+        if (previous[draft.id] !== draft) return previous;
+        return {
+          ...previous,
+          [draft.id]: {
+            ...draft,
+            status: "saved",
+            message:
+              "Your change was saved. The latest capacity has now been loaded.",
+          },
+        };
       });
     }
   }
@@ -252,7 +270,7 @@ export function CapacityGrid({ from, to }: Props) {
   function closeEditor() {
     if (!editor || capacity.saving) return;
     // An unconfirmed draft survives dismissing the panel and opening it again.
-    if (editor.status !== "unconfirmed") {
+    if (!editor.unconfirmed) {
       setDrafts((previous) => {
         const next = { ...previous };
         delete next[editor.id];
@@ -266,7 +284,7 @@ export function CapacityGrid({ from, to }: Props) {
 
   const isSaved =
     editor?.status === "saved" || editor?.status === "saved-refresh-failed";
-  const isUnconfirmed = editor?.status === "unconfirmed";
+  const isUnconfirmed = Boolean(editor?.unconfirmed);
   const readBlocked =
     capacity.loading || Boolean(capacity.error) || unconfirmedDrafts.length > 0;
 
@@ -451,18 +469,23 @@ export function CapacityGrid({ from, to }: Props) {
                   type="text"
                   inputMode="decimal"
                   aria-label={`Weekly hours for ${editor.name}`}
-                  aria-describedby={
-                    editor.message
-                      ? "hours-guidance save-message"
-                      : "hours-guidance"
-                  }
+                  aria-describedby={[
+                    "hours-guidance",
+                    editor.message ? "save-message" : "",
+                    editor.validation ? "hours-validation" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   value={editor.value}
                   disabled={capacity.saving || checking}
-                  aria-invalid={editor.status === "rejected"}
+                  aria-invalid={
+                    Boolean(editor.validation) || editor.status === "rejected"
+                  }
                   onChange={(event) =>
                     updateDraft(editor.id, {
                       value: event.target.value,
-                      status: isUnconfirmed ? "unconfirmed" : "editing",
+                      status: "editing",
+                      validation: undefined,
                       message: isUnconfirmed
                         ? "Your draft has changed. The earlier save is still unconfirmed. Check the current value before saving again."
                         : "",
@@ -499,6 +522,11 @@ export function CapacityGrid({ from, to }: Props) {
             <p id="hours-guidance" className="input-help">
               0–168 hours · Up to 2 decimal places · 0 means no capacity
             </p>
+            {editor.validation && (
+              <p id="hours-validation" className="field-error" role="alert">
+                {editor.validation}
+              </p>
+            )}
             {editor.message && (
               <div
                 className={`save-feedback ${isSaved ? "save-success" : "save-warning"}`}
@@ -510,7 +538,7 @@ export function CapacityGrid({ from, to }: Props) {
                     type="button"
                     className="text-button"
                     onClick={() => void checkLatest()}
-                    disabled={checking || capacity.loading}
+                    disabled={checking || capacity.loading || capacity.saving}
                   >
                     {checking ? "Checking…" : "Check current value"}
                   </button>

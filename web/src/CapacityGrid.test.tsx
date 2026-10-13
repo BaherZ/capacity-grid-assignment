@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -44,6 +45,13 @@ function json(body: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 async function openEditor() {
   fireEvent.click(
@@ -111,6 +119,70 @@ describe("weekly capacity editing", () => {
     expect(JSON.parse(mock.mock.calls[1][1].body)).toEqual({ weekly_hours: 0 });
   });
 
+  it("keeps a newer unsaved draft editable when an earlier refresh retry completes", async () => {
+    const refresh = deferred<Response>();
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(fixture()))
+      .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 32 }))
+      .mockRejectedValueOnce(new Error("Offline"))
+      .mockReturnValueOnce(refresh.promise);
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    const input = await openEditor();
+    fireEvent.change(input, { target: { value: "32" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/Saved 32 hours per week. The capacity refresh failed/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry refresh" }));
+    fireEvent.change(input, { target: { value: "25" } });
+    await act(async () => {
+      refresh.resolve(json(fixture(32)));
+    });
+
+    expect(input).toHaveValue("25");
+    expect(screen.getByRole("button", { name: "Save capacity" })).toBeEnabled();
+    expect(
+      screen.queryByText(
+        "Your change was saved. The latest capacity has now been loaded.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Edit weekly hours for Ana" }),
+    ).toHaveTextContent("32 h / week");
+    expect(
+      mock.mock.calls.filter(([, init]) => init?.method === "PATCH"),
+    ).toHaveLength(1);
+  });
+
+  it("reopens a complete editor after it was closed during a refresh retry", async () => {
+    const refresh = deferred<Response>();
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(fixture()))
+      .mockResolvedValueOnce(json({ id: 1, name: "Ana", weekly_hours: 32 }))
+      .mockRejectedValueOnce(new Error("Offline"))
+      .mockReturnValueOnce(refresh.promise);
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    fireEvent.change(await openEditor(), { target: { value: "32" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/Saved 32 hours per week. The capacity refresh failed/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close editor" }));
+    await act(async () => {
+      refresh.resolve(json(fixture(32)));
+    });
+
+    expect(await openEditor()).toHaveValue("32");
+    expect(screen.getByRole("button", { name: "Save capacity" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByRole("region", { name: "Edit capacity for Ana" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("rejects blank hours locally but sends decimal hours without rounding", async () => {
     const mock = vi
       .fn()
@@ -173,6 +245,78 @@ describe("weekly capacity editing", () => {
     expect(
       mock.mock.calls.filter(([, init]) => init?.method === "PATCH"),
     ).toHaveLength(1);
+  });
+
+  it("preserves an unconfirmed write when a checked draft fails local validation", async () => {
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(fixture()))
+      .mockRejectedValueOnce(new TypeError("Response lost"))
+      .mockResolvedValueOnce(json(fixture()));
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    const input = await openEditor();
+    fireEvent.change(input, { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/We could not confirm whether your change was saved/);
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Check current value" }));
+    await screen.findByText(/earlier request may still finish/);
+    fireEvent.click(screen.getByRole("button", { name: "Save draft again" }));
+
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/Blank is not zero/)).toBeVisible();
+    expect(screen.getByText(/A save is unconfirmed/)).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Check current value" }),
+    ).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Close editor" }));
+    expect(
+      screen.getByRole("button", { name: "Review Ana’s change" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Review Ana’s change" }));
+    expect(
+      screen.getByRole("textbox", { name: "Weekly hours for Ana" }),
+    ).toHaveValue("");
+    expect(
+      mock.mock.calls.filter(([, init]) => init?.method === "PATCH"),
+    ).toHaveLength(1);
+  });
+
+  it("reconciles the earlier submission when a later write retry is rejected", async () => {
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(fixture()))
+      .mockRejectedValueOnce(new TypeError("Response lost"))
+      .mockResolvedValueOnce(json(fixture()))
+      .mockResolvedValueOnce(json({ error: "This change was rejected." }, 400))
+      .mockResolvedValueOnce(json(fixture(20)));
+    vi.stubGlobal("fetch", mock);
+    render(<CapacityGrid from={query.from} to={query.to} />);
+    const input = await openEditor();
+    fireEvent.change(input, { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save capacity" }));
+    await screen.findByText(/We could not confirm whether your change was saved/);
+
+    fireEvent.change(input, { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: "Check current value" }));
+    await screen.findByText(/earlier request may still finish/);
+    fireEvent.click(screen.getByRole("button", { name: "Save draft again" }));
+    await screen.findByText(/This change was rejected/);
+
+    expect(input).toHaveValue("30");
+    expect(screen.getByText(/A save is unconfirmed/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Check current value" }));
+    await screen.findByText(/earlier submission of 20 hours per week/);
+    expect(input).toHaveValue("30");
+    expect(screen.queryByText(/A save is unconfirmed/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save capacity" })).toBeEnabled();
+    expect(
+      mock.mock.calls
+        .filter(([, init]) => init?.method === "PATCH")
+        .map(([, init]) => JSON.parse(init.body)),
+    ).toEqual([{ weekly_hours: 20 }, { weekly_hours: 30 }]);
   });
 });
 
