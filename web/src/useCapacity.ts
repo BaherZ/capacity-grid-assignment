@@ -12,6 +12,8 @@ type ReadState = {
   key: string | null;
   loading: boolean;
   error: string | null;
+  // Advances only when the latest GET succeeds, not when a write clears an error.
+  readRevision: number;
 };
 export type ReadResult = {
   data?: CapacityData;
@@ -51,6 +53,7 @@ export function useCapacity(query: CapacityQuery) {
     key: null,
     loading: true,
     error: null,
+    readRevision: 0,
   });
   const [saving, setSaving] = useState(false);
   const latestQuery = useRef(query);
@@ -84,7 +87,13 @@ export function useCapacity(query: CapacityQuery) {
           );
         const data = parseCapacityResponse(await response.json(), target);
         if (!isCurrent()) return { obsolete: true };
-        setState({ data, key: queryKey(target), loading: false, error: null });
+        setState({
+          data,
+          key: queryKey(target),
+          loading: false,
+          error: null,
+          readRevision: version,
+        });
         return { data };
       } catch (error) {
         if (!isCurrent()) return { obsolete: true };

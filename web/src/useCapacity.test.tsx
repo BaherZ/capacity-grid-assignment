@@ -39,6 +39,7 @@ function deferred<T>() {
 }
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -54,17 +55,20 @@ describe("capacity request ordering", () => {
     );
     const { result } = renderHook(() => useCapacity(first));
     await waitFor(() => expect(result.current.current).not.toBeNull());
+    const acceptedRead = result.current.readRevision;
     await act(async () => {
       await result.current.refresh();
     });
     expect(result.current.error).toMatch(/Capacity data/);
     expect(result.current.current?.people[0].weekly_hours).toBe(40);
     expect(result.current.loading).toBe(false);
+    expect(result.current.readRevision).toBe(acceptedRead);
     await act(async () => {
       await result.current.refresh();
     });
     expect(result.current.error).toBeNull();
     expect(result.current.current?.people[0].weekly_hours).toBe(32);
+    expect(result.current.readRevision).toBeGreaterThan(acceptedRead);
   });
 
   it("does not confirm or apply a successful response for a different person", async () => {
@@ -96,6 +100,84 @@ describe("capacity request ordering", () => {
       expect(await refresh).toEqual({ obsolete: true });
     });
     expect(result.current.current?.people[0].weekly_hours).toBe(40);
+  });
+
+  it("times out a read without discarding previously confirmed values", async () => {
+    vi.useFakeTimers();
+    let pendingSignal: AbortSignal | undefined;
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(data(first)))
+      .mockImplementationOnce((_url, options: RequestInit) => {
+        pendingSignal = options.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          pendingSignal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        });
+      });
+    vi.stubGlobal("fetch", mock);
+    const { result } = renderHook(() => useCapacity(first));
+    await act(async () => {});
+    expect(result.current.current?.people[0].weekly_hours).toBe(40);
+    let refresh!: ReturnType<typeof result.current.refresh>;
+    act(() => {
+      refresh = result.current.refresh();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(pendingSignal?.aborted).toBe(true);
+    expect(await refresh).toEqual({
+      error: "Loading timed out. Please try again.",
+    });
+    expect(result.current.current?.people[0].weekly_hours).toBe(40);
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe("Loading timed out. Please try again.");
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a timed-out write as unconfirmed without retrying it automatically", async () => {
+    vi.useFakeTimers();
+    let pendingSignal: AbortSignal | undefined;
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(json(data(first)))
+      .mockImplementationOnce((_url, options: RequestInit) => {
+        pendingSignal = options.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          pendingSignal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        });
+      });
+    vi.stubGlobal("fetch", mock);
+    const { result } = renderHook(() => useCapacity(first));
+    await act(async () => {});
+    let save!: ReturnType<typeof result.current.save>;
+    act(() => {
+      save = result.current.save(1, 20);
+    });
+    expect(result.current.saving).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(pendingSignal?.aborted).toBe(true);
+    expect(await save).toMatchObject({ kind: "unconfirmed" });
+    expect(result.current.saving).toBe(false);
+    expect(result.current.current?.people[0].weekly_hours).toBe(40);
+    expect(result.current.loading).toBe(false);
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts an in-flight read on unmount and ignores its late completion", async () => {
+    const response = deferred<Response>();
+    const mock = vi.fn().mockReturnValue(response.promise);
+    vi.stubGlobal("fetch", mock);
+    const { result, unmount } = renderHook(() => useCapacity(first));
+    const beforeUnmount = result.current;
+    const signal = mock.mock.calls[0][1].signal as AbortSignal;
+    unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => response.resolve(json(data(first))));
+    expect(result.current).toBe(beforeUnmount);
+    expect(mock).toHaveBeenCalledTimes(1);
   });
 
   it("confirms a save and releases the save guard before its refresh finishes", async () => {
